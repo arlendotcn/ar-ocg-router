@@ -1,0 +1,12 @@
+# Normalise line endings, but keep Windows scripts on CRLF: cmd.exe misparses LF in some
+# contexts, and these files are only ever run on Windows.
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets - never touch
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff2 binary
