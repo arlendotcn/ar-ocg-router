@@ -1,0 +1,32 @@
+# ar-OCG-Router systemd unit (code name: ar-ocg-router)
+# install.sh 会把 @BIN@ / @CONFIG@ / @LOGDIR@ / @CONFIGDIR@ / @WORKDIR@ 替换成实际路径
+[Unit]
+Description=ar-OCG-Router - multi-account LLM router (OpenCode Go + DeepSeek official)
+Documentation=https://api-docs.deepseek.com/quick_start/pricing/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=@BIN@ --config @CONFIG@ --log-level info
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=20
+WorkingDirectory=@WORKDIR@
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ar-ocg-router
+
+# 只要出网，其余收紧
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+ReadWritePaths=@LOGDIR@ @CONFIGDIR@
+
+[Install]
+WantedBy=multi-user.target

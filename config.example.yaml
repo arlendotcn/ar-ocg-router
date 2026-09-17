@@ -1,0 +1,191 @@
+# ============================================================================
+#  ar-OCG-Router  (code name: ar-ocg-router)  v0.0.1
+#  配置模板：把 sk-REPLACE_ME 换成自己的 key
+# ============================================================================
+#
+#  ★ 核心概念：一个端点 = 一个商家 + 一个模型（1:1，配置中固定）
+#      - model 字段是该端点唯一会发给上游的模型 id（客户端传的 model 只用于"命中端点"）
+#      - 客户端 model 写法：ar-ocg-router（或不传=正常路由） / <端点名>/任意 / <provider>/<模型id>
+#      - GET /v1/models 只返回一个 id: ar-ocg-router
+#
+#  ★ 默认零改写：请求体除 model 外原样透传；协议头原样转发。
+#      compat 里的两个改写开关默认全关，只在某个上游确实不兼容时按端点开启。
+#
+#  忙时 = 周一~周五 01:00-04:00、06:00-10:00 (UTC)；其余含周末为闲时（官方单价减半）
+#  闲时顺序：预计用不完的 plan → 现金 → 留给忙时的 plan；忙时：所有 plan → 现金
+#  同段内 order 较小的优先使用；同一 order 内按 weight 分摊（weight 不是优先级）
+#
+#  name 规则：显式优先（重名自动 -2/-3）；缺省生成 <provider>-<model>-<key指纹>
+# ============================================================================
+
+server:
+  host: 127.0.0.1
+  port: 8787
+  max_connections: 64
+  idle_timeout_secs: 1800
+  read_timeout_secs: 600
+
+log:
+  level: info
+  file: ""
+
+router:
+  mode: auto                 # auto | plans | fallback
+  peak_windows: "Mon-Fri 01:00-04:00, 06:00-10:00 UTC"
+  idle_prefer: surplus_first # surplus_first | plans | fallback
+  surplus_max_pct: 80
+  surplus_projection: true
+  quota_refresh_secs: 60
+  selection: weighted        # 同一 order 内：weighted | round_robin | lowest_quota
+  # 会话亲和：同一会话固定同一端点，保住上游的会话/缓存语义（这是确定性协调，不是成本优化）。
+  # 端点不健康时会自动放弃粘性。
+  session_affinity: true
+  session_affinity_ttl_secs: 1800
+  # 客户端没传会话头时用什么：process（全进程一个 id，缓存稳）/ per-request（每次新 id，无缓存）
+  session_fallback: process
+  # 端点连续 N 次"服务不了/参数错"就整段跳过，避免回退把配置错误掩盖成"只是慢"
+  skip_after_failures: 3
+  skip_secs: 300
+  attempt_budget_secs: 120   # 端点间重试的总时间预算（流式只计首字节前）
+  session_headers:           # 从哪些请求头里取会话 id（供 session_affinity 与上游会话头用）
+    - x-opencode-session
+    - x-session-id
+    - session-id
+    - x-dsh-session
+    - x-dsh-session-id
+    - x-conversation-id
+    - x-thread-id
+  user_agent: "ar-ocg-router/0.0.1 (coding-agent)"
+  stream_idle_timeout_secs: 300
+
+compat:                      # 默认零改写；确有必要时再开
+  developer_role_to_system: false
+  max_completion_tokens_to_max_tokens: false
+  drop_params: []            # 例如 [store, service_tier]（默认不动任何字段）
+  forward_headers: []        # 额外要原样转发的客户端头（协议头已内置白名单）
+
+# ============================================================================
+#  plans: 预付额度端点
+# ============================================================================
+plans:
+  # ---- OpenCode Go / DeepSeek V4.1 Flash（/usage 三窗口可查；需带会话头）----
+  - name: go-dsf
+    url: https://opencode.ai/zen/go/v1
+    provider: opencodego
+    key: sk-REPLACE_ME
+    model: deepseek-flash
+    mode: both
+    order: 10
+    weight: 60
+    inject_session: true                      # Go 要求 x-opencode-session，显式开启
+    quota: { unit: usd, rolling: 12, weekly: 30, monthly: 60, probe: usage }
+
+  # ---- 阿里百炼 Token Plan / DeepSeek V4.1 Flash ----
+  - name: bailian-dsf
+    url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+    provider: generic
+    key: sk-REPLACE_ME
+    model: deepseek-v4.1-flash
+    mode: both
+    order: 20
+    weight: 50
+    quota: { probe: none }
+
+  # ---- 阿里百炼 Token Plan / Qwen3.8-Max（另一条端点；同一 key 可写多份）----
+  # - name: bailian-qwen
+  #   url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+  #   provider: generic
+  #   key: sk-REPLACE_ME
+  #   model: qwen3.8-max
+  #   mode: both
+  #   order: 21
+  #   weight: 50
+  #   quota: { probe: none }
+
+  # ---- 火山方舟 Coding Plan / GLM-5.3-Flash（实测白名单内可用）----
+  - name: vol-glm
+    url: https://ark.cn-beijing.volces.com/api/coding/v3
+    provider: generic
+    key: sk-REPLACE_ME
+    model: glm-5.3-flash
+    mode: both
+    order: 30
+    weight: 50
+    quota: { probe: none }
+
+  # ---- 火山方舟 Coding Plan / Kimi K2 ----
+  # - name: vol-kimi
+  #   url: https://ark.cn-beijing.volces.com/api/coding/v3
+  #   provider: generic
+  #   key: sk-REPLACE_ME
+  #   model: kimi-k2-250905
+  #   mode: both
+  #   order: 31
+  #   weight: 50
+  #   quota: { probe: none }
+
+# ============================================================================
+#  fallback: 现金按量端点
+# ============================================================================
+fallback:
+  # ---- DeepSeek 官方 / V4.1 Flash ----
+  - name: ds-official-flash
+    url: https://api.deepseek.com
+    provider: deepseek
+    key: sk-REPLACE_ME
+    model: deepseek-flash
+    mode: both
+    order: 10
+    weight: 50
+    rule: [offpeak, quota_low]
+    quota: { probe: balance }
+
+  # ---- DeepSeek 官方 / V4 Pro ----
+  # - name: ds-official-pro
+  #   url: https://api.deepseek.com
+  #   provider: deepseek
+  #   key: sk-REPLACE_ME
+  #   model: deepseek-v4-pro
+  #   mode: both
+  #   order: 11
+  #   weight: 50
+  #   rule: [offpeak, quota_low]
+  #   quota: { probe: balance }
+
+  # ---- Nebula Codex 中转 / GPT-5.6-Sol（rule: never = 只做最后兜底）----
+  - name: nb-codex
+    url: https://apinebula.ai/v1
+    provider: generic
+    key: sk-REPLACE_ME
+    model: gpt-5.6-sol
+    mode: both
+    order: 90
+    weight: 50
+    rule: never
+    quota: { probe: none }
+
+  # ---- Nebula Claude 中转（anthropic 协议；上游要求 Claude Code 特征头，接受再开）----
+  # - name: nb-claude
+  #   url: https://apinebula.ai/v1
+  #   provider: generic
+  #   key: sk-REPLACE_ME
+  #   model: claude-sonnet-5
+  #   mode: anthropic-messages
+  #   order: 91
+  #   weight: 50
+  #   rule: never
+  #   headers:
+  #     user-agent: claude-cli/2.1.0 (external, cli)
+  #   quota: { probe: none }
+
+  # ---- 局域网 LM Studio（需按你的局域网地址修改；局域网地址会让兜底多等一个连接超时）----
+  # - name: local-ornith
+  #   url: http://192.168.1.50:1234/v1
+  #   provider: generic
+  #   key: sk-REPLACE_ME
+  #   model: ornith-1.5-35b-a3b
+  #   mode: both
+  #   order: 95
+  #   weight: 50
+  #   rule: never
+  #   quota: { probe: none }

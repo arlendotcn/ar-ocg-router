@@ -1,0 +1,253 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "id": "deepseek-flash",
+      "label": "DeepSeek V4.1 Flash",
+      "aliases": [
+        "deepseek-v4.1-flash",
+        "deepseek-v4-1-flash",
+        "deepseek-v4-flash"
+      ],
+      "context_tokens": 128000,
+      "max_output_tokens": 8192,
+      "reasoning_levels": [
+        "none",
+        "low",
+        "medium",
+        "high"
+      ],
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "notes": "两家（DeepSeek 官方 / OpenCode Go）都提供，官方 id 是 deepseek-flash；部分国内套餐叫 deepseek-v4.1-flash。",
+      "tags": [
+        "deepseek",
+        "general"
+      ]
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "label": "DeepSeek V4 Pro",
+      "aliases": [],
+      "context_tokens": 128000,
+      "max_output_tokens": 16384,
+      "reasoning_levels": [
+        "none",
+        "low",
+        "medium",
+        "high"
+      ],
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "notes": "强推理档，单价约为 Flash 的 4 倍；忙时再翻倍。",
+      "tags": [
+        "deepseek",
+        "reasoning"
+      ]
+    },
+    {
+      "id": "deepseek-v4-flash-vision-exp",
+      "label": "DeepSeek V4 Flash Vision (exp)",
+      "aliases": [],
+      "context_tokens": 128000,
+      "max_output_tokens": 8192,
+      "reasoning_levels": [],
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "notes": "实验性多模态档；列表里未必出现，按需实测。",
+      "tags": [
+        "deepseek",
+        "vision"
+      ]
+    },
+    {
+      "id": "glm-5.3-flash",
+      "label": "GLM-5.3 Flash",
+      "aliases": [
+        "glm-5-3-flash"
+      ],
+      "context_tokens": 200000,
+      "max_output_tokens": 8192,
+      "reasoning_levels": [
+        "none",
+        "medium"
+      ],
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "notes": "火山方舟 Coding Plan 实测可用；注意该套餐的 /models 列表并不可信。",
+      "tags": [
+        "glm",
+        "plan"
+      ]
+    },
+    {
+      "id": "glm-5.3",
+      "label": "GLM-5.3",
+      "aliases": [
+        "glm-5.2",
+        "glm-5.1"
+      ],
+      "context_tokens": 200000,
+      "max_output_tokens": 16384,
+      "reasoning_levels": [
+        "none",
+        "low",
+        "medium",
+        "high"
+      ],
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "notes": "",
+      "tags": [
+        "glm",
+        "reasoning"
+      ]
+    },
+    {
+      "id": "qwen3.8-max",
+      "label": "Qwen3.8 Max",
+      "aliases": [],
+      "context_tokens": 262144,
+      "max_output_tokens": 16384,
+      "reasoning_levels": [
+        "none",
+        "low",
+        "medium",
+        "high"
+      ],
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "notes": "百炼 Token Plan 可挂；长上下文。",
+      "tags": [
+        "qwen",
+        "plan",
+        "long-context"
+      ]
+    },
+    {
+      "id": "kimi-k2.6",
+      "label": "Kimi K2.6",
+      "aliases": [
+        "kimi-k2.5"
+      ],
+      "context_tokens": 262144,
+      "max_output_tokens": 16384,
+      "reasoning_levels": [
+        "none",
+        "medium"
+      ],
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "notes": "",
+      "tags": [
+        "kimi",
+        "long-context"
+      ]
+    },
+    {
+      "id": "minimax-m2.7",
+      "label": "MiniMax M2.7",
+      "aliases": [
+        "minimax-m2.5",
+        "minimax-m3"
+      ],
+      "context_tokens": 200000,
+      "max_output_tokens": 8192,
+      "reasoning_levels": [
+        "none",
+        "medium"
+      ],
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "notes": "",
+      "tags": [
+        "minimax"
+      ]
+    },
+    {
+      "id": "claude-sonnet-5",
+      "label": "Claude Sonnet 5",
+      "aliases": [],
+      "context_tokens": 200000,
+      "max_output_tokens": 16384,
+      "reasoning_levels": [
+        "none",
+        "low",
+        "medium",
+        "high"
+      ],
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "notes": "走 Claude 中转时上游常要求 Claude Code 特征头（见端点的附加请求头）。",
+      "tags": [
+        "anthropic",
+        "vision"
+      ]
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "label": "GPT-5.6 Sol",
+      "aliases": [
+        "gpt-5.6-luna"
+      ],
+      "context_tokens": 400000,
+      "max_output_tokens": 32768,
+      "reasoning_levels": [
+        "none",
+        "low",
+        "medium",
+        "high"
+      ],
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "notes": "默认只作最后兜底（rule: never）。",
+      "tags": [
+        "openai",
+        "vision"
+      ]
+    }
+  ]
+}

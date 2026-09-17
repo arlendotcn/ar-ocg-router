@@ -1,0 +1,292 @@
+@import "tailwindcss";
+
+/* ============================================================================
+   ar-OCG-Router control room
+   Aesthetic: dark instrument panel. Engineering graph paper, hairline rules,
+   a faint amber/grid substrate, and instrument-panel readouts. Numbers drive
+   the type (tabular figures everywhere); colour is reserved for STATE.
+   Light mode is the same instrument under lab lighting, not a different design.
+   ========================================================================== */
+
+@theme {
+  /* Type scale. 0.75rem (12px) is the hard floor for anything a user must read;
+     the 11px/10px steps that used to be everywhere are gone. */
+  --text-2xs: 0.75rem;
+  --text-2xs--line-height: 1.05rem;
+  --text-xs: 0.8125rem;
+  --text-xs--line-height: 1.15rem;
+  --text-sm: 0.875rem;
+  --text-sm--line-height: 1.3rem;
+  --text-base: 0.9375rem;
+  --text-base--line-height: 1.45rem;
+  --text-lg: 1.0625rem;
+  --text-lg--line-height: 1.5rem;
+  --text-xl: 1.25rem;
+  --text-xl--line-height: 1.6rem;
+  --text-2xl: 1.5rem;
+  --text-2xl--line-height: 1.75rem;
+  --text-3xl: 1.75rem;
+  --text-3xl--line-height: 1.9rem;
+
+  /* Mono keeps the latin webfont first (numbers/code read better in it) and then the
+     platform CJK face for the ideographs that the webfont does not cover. */
+  --font-mono: var(--font-plex-mono), ui-monospace, SFMono-Regular, Menlo, Consolas,
+    "Cascadia Mono", "Sarasa Mono SC", "Microsoft YaHei Mono", "PingFang SC", "Microsoft YaHei",
+    monospace;
+  /* Sans puts the *native CJK face first* so Chinese text is shaped by the platform's own
+     font (YaHei on Windows, PingFang on macOS/iOS, Noto on Android/Linux) instead of falling
+     back with whatever glyphs the latin webfont happens to carry. */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "微软雅黑", "Source Han Sans SC", "Noto Sans CJK SC", "Noto Sans SC",
+    var(--font-plex-sans), Roboto, "Helvetica Neue", Arial, sans-serif;
+
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-ink-dim: var(--ink-dim);
+  --color-ink-faint: var(--ink-faint);
+  --color-signal: var(--signal);
+  --color-plans: var(--plans);
+  --color-cash: var(--cash);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
+}
+
+:root {
+  --bg: #f4f5f2;
+  --panel: #fbfbf9;
+  --panel-2: #eeefeb;
+  --line: #d5d8d0;
+  --line-strong: #b3b8ab;
+  --ink: #14161a;
+  --ink-dim: #4c5347;
+  /* Used for real UI text (inactive tabs, captions), so it must clear WCAG AA on the
+     page background and on --panel-2, not just look "quiet". */
+  --ink-faint: #5f6659;
+  --signal: #a8620a;
+  --plans: #166b54;
+  --cash: #1d5f9e;
+  --warn: #8a6100;
+  --danger: #a52a2a;
+  --grid: rgba(20, 22, 26, 0.055);
+  --glow: rgba(168, 98, 10, 0.10);
+  --up: #166b54;
+  --down: #a52a2a;
+  /* Solid buttons carry their own fill + label pair so the two can never collapse into
+     each other. Light: near-black fill, near-white label. */
+  --solid: #14161a;
+  --solid-hover: #a8620a;
+  --on-solid: #fbfbf9;
+  color-scheme: light;
+}
+
+.dark {
+  --bg: #0c0d0e;
+  --panel: #131417;
+  --panel-2: #191b1f;
+  --line: #26282d;
+  --line-strong: #3a3d44;
+  --ink: #e8e9e4;
+  --ink-dim: #a2a79d;
+  --ink-faint: #8d938a;
+  --signal: #ffa53d;
+  --plans: #4ad7a8;
+  --cash: #6fb4f5;
+  --warn: #ffcc4d;
+  --danger: #ff6b6b;
+  --grid: rgba(232, 233, 228, 0.045);
+  --glow: rgba(255, 165, 61, 0.07);
+  --up: #4ad7a8;
+  --down: #ff6b6b;
+  /* Dark: light fill, near-black label. */
+  --solid: #e8e9e4;
+  --solid-hover: #ffa53d;
+  --on-solid: #0c0d0e;
+  color-scheme: dark;
+}
+
+* {
+  border-color: var(--line);
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  /* Keep CJK from being letter-spaced oddly and avoid synth-bold smearing. */
+  font-synthesis-weight: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  background-image: linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 28px 28px, 28px 28px;
+  background-position: -1px -1px, -1px -1px;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background: radial-gradient(900px 480px at 82% -8%, var(--glow), transparent 60%);
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* --- the shared "instrument plate" surface --------------------------------- */
+.plate {
+  position: relative;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+}
+.plate::before,
+.plate::after {
+  content: "";
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  border-color: var(--line-strong);
+  border-style: solid;
+  border-width: 0;
+}
+.plate::before {
+  top: -1px;
+  left: -1px;
+  border-top-width: 1px;
+  border-left-width: 1px;
+}
+.plate::after {
+  bottom: -1px;
+  right: -1px;
+  border-bottom-width: 1px;
+  border-right-width: 1px;
+}
+
+.plate-flush {
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+
+.rule {
+  height: 1px;
+  background: var(--line);
+}
+
+.label {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.05rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+/* --- motion ---------------------------------------------------------------- */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.rise {
+  animation: rise 0.34s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.82); }
+}
+.live-dot {
+  animation: pulse-dot 2.2s ease-in-out infinite;
+}
+
+@keyframes sweep {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+.sweep {
+  transform-origin: left center;
+  animation: sweep 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* --- focus + scrollbars ---------------------------------------------------- */
+:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 0;
+}
+
+/* Element resets MUST live in @layer base. An unlayered rule outranks every Tailwind
+   utility, so a bare `color: inherit` here silently defeated every text-* utility on form
+   controls and made solid buttons render their label in the fill colour (invisible). */
+@layer base {
+  input,
+  textarea,
+  select,
+  button {
+    font: inherit;
+    color: inherit;
+  }
+
+  input,
+  textarea,
+  select {
+    font-family: var(--font-mono);
+  }
+
+  select option {
+    background: var(--panel);
+    color: var(--ink);
+  }
+}

@@ -1,0 +1,19 @@
+target/
+dist/
+config.yaml
+
+# scratch space for screenshots and notes
+.temp/
+*.log
+*.pdb
+
+# runtime state, written next to the config file
+ar-ocg-router.state.json
+*.corrupt
+
+# web console: dependencies and build output are reproducible, the sources are not
+web/node_modules/
+web/.next/
+web/out/
+web/next-env.d.ts
+web/*.tsbuildinfo

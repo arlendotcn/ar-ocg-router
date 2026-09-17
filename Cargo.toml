@@ -1,0 +1,32 @@
+[package]
+name = "ar-ocg-router"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.75"
+description = "ar-OCG-Router - multi-account router for OpenCode Go + DeepSeek official API (peak/off-peak aware)"
+authors = ["ar"]
+
+[[bin]]
+name = "ar-ocg-router"
+path = "src/main.rs"
+
+[features]
+default = ["webui"]
+# Embeds web/out (a static Next.js export) into the binary. Requires that the web
+# bundle has been built first - see build.ps1 / build.sh. Without it the router
+# serves the console from web/out at runtime and still proxies normally.
+webui = ["include_dir"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+ureq = { version = "2.12", default-features = false, features = ["tls", "gzip"] }
+include_dir = { version = "0.7", optional = true }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
