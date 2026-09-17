@@ -274,14 +274,12 @@ fn main() {
         );
         for a in &cfg.accounts {
             println!(
-                "  [{}#{}] {:<18} {:<45} modes={:<26} order={} weight={} quota={}/{}{} rules={}",
+                "  [{}#{}] {:<18} {:<45} modes={:<26} quota={}/{}{} rules={}",
                 a.kind.as_str(),
                 a.order,
                 a.name,
                 a.base(),
                 a.modes.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(","),
-                a.order,
-                a.weight,
                 a.quota.unit.as_str(),
                 a.quota.probe.as_str(),
                 if a.quota.measures_something() {
@@ -546,10 +544,9 @@ fn print_plan(state: &Arc<proxy::AppState>) {
         for acc in accounts.iter() {
             let report = acc.rt.quota_report(now, &cfg, &acc.cfg.quota);
             println!(
-                "  [{}] {:<18} weight={} rules={} quota={} exhausted={} surplus={} cooldown={}s",
+                "  [{}] {:<18} rules={} quota={} exhausted={} surplus={} cooldown={}s",
                 acc.cfg.kind.as_str(),
                 acc.name(),
-                acc.cfg.weight,
                 acc.cfg
                     .rules
                     .iter()

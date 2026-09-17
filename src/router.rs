@@ -1,12 +1,11 @@
-//! Endpoint ordering: peak/off-peak buckets, order/weight, quota awareness, endpoint health.
+//! Endpoint ordering: peak/off-peak buckets, the order field, quota awareness, endpoint health.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::config::{AccountKind, Config, IdlePrefer, Rule, Selection};
+use crate::config::{AccountKind, Config, IdlePrefer, Rule};
 use crate::models::{Endpoint, ForcedEndpoint};
 use crate::state::Account;
-use crate::util;
 
 /// Buckets are tried in policy order, and each bucket is consumed by "order:" internally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,7 +489,9 @@ impl Router {
                 }
                 keep.push(acc);
             }
-            out.extend(self.order_group(cfg, &keep, now));
+            // Within one order group the list position is the sequence: the console writes
+            // "order" from the row position, so position and order can never disagree.
+            out.extend(keep);
         }
         out
     }
@@ -550,61 +551,11 @@ impl Router {
                 }
                 keep.push(acc);
             }
-            out.extend(self.order_group(cfg, &keep, now));
+            // Within one order group the list position is the sequence: the console writes
+            // "order" from the row position, so position and order can never disagree.
+            out.extend(keep);
         }
         out
-    }
-
-    /// Intra-group ordering: configured strategy, with weight 0 pushed to the very end.
-    fn order_group(&self, cfg: &Config, accounts: &[Arc<Account>], now: i64) -> Vec<Arc<Account>> {
-        if accounts.len() <= 1 {
-            return accounts.to_vec();
-        }
-        let mut list: Vec<Arc<Account>> = accounts.to_vec();
-        let weight_of = |a: &Arc<Account>| -> f64 {
-            let w = a.cfg.weight as f64;
-            if w <= 0.0 {
-                0.0
-            } else {
-                w
-            }
-        };
-        match cfg.router.selection {
-            Selection::Weighted => {
-                // Efraimidis-Spirakis weighted random permutation.
-                let mut keyed: Vec<(f64, Arc<Account>)> = list
-                    .drain(..)
-                    .map(|a| {
-                        let w = weight_of(&a);
-                        let key = if w <= 0.0 {
-                            0.0
-                        } else {
-                            util::rand_f64().powf(1.0 / w)
-                        };
-                        (key, a)
-                    })
-                    .collect();
-                keyed.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                list = keyed.into_iter().map(|(_, a)| a).collect();
-            }
-            Selection::RoundRobin => {
-                list.sort_by_key(|a| a.rt.next_rr());
-            }
-            Selection::LowestQuota => {
-                list.sort_by(|a, b| {
-                    let ra = a.rt.quota_report(now, cfg, &a.cfg.quota);
-                    let rb = b.rt.quota_report(now, cfg, &b.cfg.quota);
-                    let ma = ra.rolling.pct.max(ra.weekly.pct).max(ra.monthly.pct);
-                    let mb = rb.rolling.pct.max(rb.weekly.pct).max(rb.monthly.pct);
-                    let ka = if side_of(a) == Side::Plans { ma } else { 0.0 };
-                    let kb = if side_of(b) == Side::Plans { mb } else { 0.0 };
-                    ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal)
-                });
-            }
-        }
-        let (mut enabled, disabled): (Vec<_>, Vec<_>) = list.into_iter().partition(|a| a.cfg.weight > 0);
-        enabled.extend(disabled);
-        enabled
     }
 }
 

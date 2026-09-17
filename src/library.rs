@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 pub const LIBRARY_FILE: &str = "models.library.json";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Default)]
 pub struct Entry {
@@ -130,7 +130,10 @@ pub fn load(config_path: &Path) -> Library {
     }
 }
 
-pub fn to_json(lib: &Library) -> Value {
+/// Serialise the library. `updated` is carried through when the file being replaced already
+/// had one: it is hand-maintained metadata about the entries, and a save from the console must
+/// not silently drop it.
+pub fn to_json(lib: &Library, updated: Option<&str>) -> Value {
     let models: Vec<Value> = lib
         .entries
         .iter()
@@ -149,7 +152,18 @@ pub fn to_json(lib: &Library) -> Value {
             })
         })
         .collect();
-    json!({ "version": VERSION, "models": models })
+    let mut doc = json!({ "version": VERSION, "models": models });
+    if let Some(u) = updated.filter(|u| !u.trim().is_empty()) {
+        doc["updated"] = json!(u.trim());
+    }
+    doc
+}
+
+/// The `updated` stamp already on disk, if any.
+pub fn updated_stamp(config_path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path_for(config_path)).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    v.get("updated").and_then(|x| x.as_str()).map(|s| s.to_string())
 }
 
 /// Validate + atomically write. Duplicate ids are rejected: the whole point of the library is to
@@ -165,7 +179,8 @@ pub fn save(config_path: &Path, doc: &Value) -> Result<Library, String> {
             return Err(format!("duplicate model id {:?}", e.id));
         }
     }
-    let text = serde_json::to_string_pretty(&to_json(&lib)).map_err(|e| e.to_string())?;
+    let stamp = updated_stamp(config_path);
+    let text = serde_json::to_string_pretty(&to_json(&lib, stamp.as_deref())).map_err(|e| e.to_string())?;
     let p = path_for(config_path);
     let tmp = p.with_extension("json.tmp");
     {
@@ -272,11 +287,91 @@ mod tests {
     }
 
     #[test]
-    fn builtin_library_parses_and_covers_the_deepseek_family() {
+    fn builtin_library_parses_and_covers_the_configured_models() {
         let l = builtin();
         assert!(!l.entries.is_empty(), "the shipped library must parse");
-        for id in ["deepseek-flash", "deepseek-v4-pro"] {
+        // Every model the shipped template configures must be resolvable, so the picker can
+        // annotate it instead of showing a bare id.
+        for id in [
+            "deepseek-flash",
+            "glm-5.3-flash",
+            "glm-5.3",
+            "qwen3.8-max",
+            "gpt-6-astra",
+            "gpt-5.6-sol",
+        ] {
             assert!(find(&l, id).is_some(), "{} should ship in the built-in library", id);
+        }
+    }
+
+    /// A save rewrites the file from the parsed entries. The hand-maintained "updated" stamp is
+    /// not derived from them, so it has to be carried over or the console silently loses it.
+    #[test]
+    fn save_preserves_the_updated_stamp_and_version() {
+        let dir = std::env::temp_dir().join(format!("ocg-lib-stamp-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let cfg = dir.join("config.yaml");
+        std::fs::write(&cfg, "server: {}
+").unwrap();
+        std::fs::write(
+            path_for(&cfg),
+            r#"{"version": 2, "updated": "2026-09-17", "models": [{"id": "m", "context_tokens": 5}]}"#,
+        )
+        .unwrap();
+
+        let lib = load(&cfg);
+        save(&cfg, &to_json(&lib, updated_stamp(&cfg).as_deref())).unwrap();
+
+        let text = std::fs::read_to_string(path_for(&cfg)).unwrap();
+        let doc: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(doc["updated"].as_str(), Some("2026-09-17"), "the stamp must survive a save");
+        assert_eq!(doc["version"].as_u64(), Some(super::VERSION as u64));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Retired models must not creep back in, and the entry that replaced one must be complete:
+    /// gpt-6-astra has no "none" effort level, which is the detail most likely to be copied
+    /// wrongly from an older OpenAI model.
+    #[test]
+    fn builtin_library_drops_retired_models_and_spells_astra_correctly() {
+        let l = builtin();
+        for id in ["deepseek-v4-pro", "deepseek-v4-flash-vision-exp"] {
+            assert!(find(&l, id).is_none(), "{} was retired and must not ship", id);
+        }
+        let astra = find(&l, "gpt-6-astra").expect("gpt-6-astra should ship");
+        assert_eq!(astra.context_tokens, 1_050_000);
+        assert_eq!(astra.max_output_tokens, 128_000);
+        assert_eq!(
+            astra.reasoning_levels,
+            vec!["low", "medium", "high", "xhigh", "max"],
+            "Astra dropped none/minimal: it cannot be run without reasoning"
+        );
+        assert!(astra.input_modalities.iter().any(|m| m == "image"));
+    }
+
+    /// The DeepSeek Flash numbers come from the merchant's own model config, and they are not the
+    /// small values an older library carried: 1M in, 384k out, image input, and no "medium" effort.
+    #[test]
+    fn deepseek_flash_carries_the_merchant_limits() {
+        let l = builtin();
+        let dsf = find(&l, "deepseek-flash").expect("deepseek-flash should ship");
+        assert_eq!(dsf.context_tokens, 1_048_576);
+        assert_eq!(dsf.max_output_tokens, 393_216);
+        assert_eq!(dsf.reasoning_levels, vec!["none", "low", "high", "xhigh", "max"]);
+        assert!(dsf.input_modalities.iter().any(|m| m == "image"));
+
+        // Every id the shipped endpoints use must resolve to this entry, or the picker shows a
+        // bare id and the endpoint looks unannotated.
+        for alias in [
+            "deepseek-v4.1-flash",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash-0731",
+            "deepseek-v4-1-flash-260910",
+            "deepseek-v4-flash-260425",
+            "deepseek-v4-flash-ga-260731",
+        ] {
+            let hit = find(&l, alias).unwrap_or_else(|| panic!("{} must resolve", alias));
+            assert_eq!(hit.id, "deepseek-flash");
         }
     }
 }

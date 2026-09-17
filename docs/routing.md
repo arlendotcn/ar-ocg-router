@@ -16,8 +16,8 @@ Endpoints are grouped into **buckets** whose order depends on the clock and the 
 | Off-peak (cash is half price) | `surplus_first` | `plans-surplus` → `fallback` → `plans-tight` |
 | Off-peak | `plans` / `fallback` | that side first |
 
-Within a bucket: ascending `order`, then the intra-group strategy (`weighted`,
-`round_robin`, `lowest_quota`). Accounts with `weight: 0` sink to the back.
+Within a bucket: ascending `order`. That value is derived from the position of the entry, so
+the sequence you arrange by dragging rows in the console is the sequence used here.
 
 The second pass adds everything still usable as a last resort, including cooling-down
 endpoints, unless they opted out.

@@ -153,13 +153,6 @@ export function PolicyPage() {
               <option value="fallback">fallback</option>
             </Select>
           </Field>
-          <Field label={t.policy.selection} help={t.policy.selectionHint}>
-            <Select value={r.selection} onChange={(e) => set("selection", e.target.value as RouterCfg["selection"])}>
-              <option value="weighted">weighted</option>
-              <option value="round_robin">round_robin</option>
-              <option value="lowest_quota">lowest_quota</option>
-            </Select>
-          </Field>
           <Field label={t.policy.surplusMaxPct} help={t.policy.surplusMaxPctHint}>
             <Input
               type="number"

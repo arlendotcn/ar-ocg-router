@@ -1,7 +1,7 @@
 //! Runtime state per account: statistics, quota ledger, cooldown, health.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
@@ -334,7 +334,7 @@ pub struct AccountRuntime {
     pub models: Mutex<Option<(i64, Vec<String>)>>,
     pub cooldown_until: AtomicI64,
     pub cooldown_reason: Mutex<Option<String>>,
-    pub rr_counter: AtomicU64,
+
 }
 
 impl AccountRuntime {
@@ -347,7 +347,7 @@ impl AccountRuntime {
             models: Mutex::new(None),
             cooldown_until: AtomicI64::new(0),
             cooldown_reason: Mutex::new(None),
-            rr_counter: AtomicU64::new(0),
+
         }
     }
 
@@ -374,10 +374,6 @@ impl AccountRuntime {
         if let Ok(mut r) = self.cooldown_reason.lock() {
             *r = None;
         }
-    }
-
-    pub fn next_rr(&self) -> u64 {
-        self.rr_counter.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Has the account's quota been probed at least once (successfully or not)?
@@ -485,7 +481,6 @@ impl AccountRuntime {
             },
             "url": cfg.base(),
             "modes": cfg.modes.iter().map(|m| m.as_str()).collect::<Vec<_>>(),
-            "weight": cfg.weight,
             "rules": cfg.rules.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
             "key": crate::util::redact(&cfg.key),
             "available": !self.in_cooldown(now),

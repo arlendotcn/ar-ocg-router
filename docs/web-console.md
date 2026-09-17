@@ -16,8 +16,8 @@ and can be overridden. Preferences live in `localStorage`; nothing is stored ser
 | Page | What it does |
 | --- | --- |
 | **Overview** | Peak/off-peak state with a countdown to the next change, request/error/stream/retry counters, plan savings versus cash spend, per-endpoint health and cooldown, quota meters for all three windows (with projection and threshold marks), balance, tokens, cache hits, latency, last error. Refreshes every 2 s and can be paused. |
-| **Endpoints** | Add, edit and remove endpoints; set `order` and `weight`; **enable/disable with immediate effect**; **duplicate an endpoint**; copy a ready-made `curl`; run a **connectivity self-test** (key, `/models`, quota or balance, one minimal request) that returns evidence-based suggestions. |
-| **Policy** | Routing mode, off-peak preference, surplus threshold and projection, exhaustion threshold, intra-group selection, session affinity, every cooldown and skip value, and the compatibility switches. Includes a **candidate order preview** that simulates a request against the current clock and quota. |
+| **Endpoints** | Add, edit and remove endpoints; **drag rows to set the consumption order**; **enable/disable with immediate effect**; **duplicate an endpoint**; copy a ready-made `curl`; run a **connectivity self-test** (key, `/models`, quota or balance, one minimal request) that returns evidence-based suggestions. |
+| **Policy** | Routing mode, off-peak preference, surplus threshold and projection, exhaustion threshold, session affinity, every cooldown and skip value, and the compatibility switches. Includes a **candidate order preview** that simulates a request against the current clock and quota. |
 | **Models** | The [model library](model-library.md): reference specs, aliases, and which endpoints use each model. |
 | **Settings** | Listen address, port, connections, timeouts, body limit, gateway keys, log level and file, copy-paste client snippets, **backup / export / import**, and raw YAML editing. |
 

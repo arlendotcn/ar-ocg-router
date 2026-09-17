@@ -1,5 +1,6 @@
 {
-  "version": 1,
+  "version": 2,
+  "updated": "2026-09-17",
   "models": [
     {
       "id": "deepseek-flash",
@@ -7,59 +8,21 @@
       "aliases": [
         "deepseek-v4.1-flash",
         "deepseek-v4-1-flash",
-        "deepseek-v4-flash"
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-0731",
+        "deepseek-v4-flash-260425",
+        "deepseek-v4-flash-ga-260731",
+        "deepseek-v4-1-flash-260910"
       ],
-      "context_tokens": 128000,
-      "max_output_tokens": 8192,
+      "context_tokens": 1048576,
+      "max_output_tokens": 393216,
       "reasoning_levels": [
         "none",
         "low",
-        "medium",
-        "high"
+        "high",
+        "xhigh",
+        "max"
       ],
-      "input_modalities": [
-        "text"
-      ],
-      "output_modalities": [
-        "text"
-      ],
-      "notes": "两家（DeepSeek 官方 / OpenCode Go）都提供，官方 id 是 deepseek-flash；部分国内套餐叫 deepseek-v4.1-flash。",
-      "tags": [
-        "deepseek",
-        "general"
-      ]
-    },
-    {
-      "id": "deepseek-v4-pro",
-      "label": "DeepSeek V4 Pro",
-      "aliases": [],
-      "context_tokens": 128000,
-      "max_output_tokens": 16384,
-      "reasoning_levels": [
-        "none",
-        "low",
-        "medium",
-        "high"
-      ],
-      "input_modalities": [
-        "text"
-      ],
-      "output_modalities": [
-        "text"
-      ],
-      "notes": "强推理档，单价约为 Flash 的 4 倍；忙时再翻倍。",
-      "tags": [
-        "deepseek",
-        "reasoning"
-      ]
-    },
-    {
-      "id": "deepseek-v4-flash-vision-exp",
-      "label": "DeepSeek V4 Flash Vision (exp)",
-      "aliases": [],
-      "context_tokens": 128000,
-      "max_output_tokens": 8192,
-      "reasoning_levels": [],
       "input_modalities": [
         "text",
         "image"
@@ -67,34 +30,11 @@
       "output_modalities": [
         "text"
       ],
-      "notes": "实验性多模态档；列表里未必出现，按需实测。",
+      "notes": "2026-09-10 发布。552B MoE（输入激活 8B / 输出激活 16B），Causal-Encoder-Decoder 非对称架构，原生视觉理解。官方 context 1,048,576；最大输出非思考 8K / 思考 64K，平台口径约 393K。推理档位无 medium。官方 id deepseek-flash，国内套餐常叫 deepseek-v4.1-flash，火山方舟带日期后缀。",
       "tags": [
         "deepseek",
-        "vision"
-      ]
-    },
-    {
-      "id": "glm-5.3-flash",
-      "label": "GLM-5.3 Flash",
-      "aliases": [
-        "glm-5-3-flash"
-      ],
-      "context_tokens": 200000,
-      "max_output_tokens": 8192,
-      "reasoning_levels": [
-        "none",
-        "medium"
-      ],
-      "input_modalities": [
-        "text"
-      ],
-      "output_modalities": [
-        "text"
-      ],
-      "notes": "火山方舟 Coding Plan 实测可用；注意该套餐的 /models 列表并不可信。",
-      "tags": [
-        "glm",
-        "plan"
+        "general",
+        "open-weight"
       ]
     },
     {
@@ -104,8 +44,60 @@
         "glm-5.2",
         "glm-5.1"
       ],
-      "context_tokens": 200000,
-      "max_output_tokens": 16384,
+      "context_tokens": 1048576,
+      "max_output_tokens": 131072,
+      "reasoning_levels": [
+        "low",
+        "high",
+        "max"
+      ],
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "notes": "2026-08-14 发布。与 GLM-5.2 同基座（约 7430 亿参数），提升全来自后训练。文本模态，context 1M / 最大输出 128K。⚠️ 不支持关闭推理（无 none），thinking.type 强制 enabled，reasoning_effort 取 low/high/max（默认 max）；老代码 thinking.type=disabled 会报错。",
+      "tags": [
+        "glm",
+        "reasoning",
+        "open-weight"
+      ]
+    },
+    {
+      "id": "glm-5.3-flash",
+      "label": "GLM-5.3 Flash",
+      "aliases": [
+        "glm-5-3-flash"
+      ],
+      "context_tokens": 1048576,
+      "max_output_tokens": 131072,
+      "reasoning_levels": [
+        "low",
+        "high",
+        "max"
+      ],
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "notes": "GLM-5.3 的轻量版，随 Coding Plan 上线。context 1M / 输出 128K，同样不支持关闭推理。火山方舟 Coding Plan 实测可用；注意该套餐的 /models 列表并不可信。",
+      "tags": [
+        "glm",
+        "plan"
+      ]
+    },
+    {
+      "id": "qwen3-max",
+      "label": "Qwen3-Max",
+      "aliases": [
+        "qwen3.8-max",
+        "qwen3-max-2026-01-23"
+      ],
+      "context_tokens": 262144,
+      "max_output_tokens": 65536,
       "reasoning_levels": [
         "none",
         "low",
@@ -118,96 +110,52 @@
       "output_modalities": [
         "text"
       ],
-      "notes": "",
+      "notes": "通义千问 3 代 Max。context 262K；最大输出：非思考 65K / 思考 32K，最大思维链 81K。百炼 Token Plan 可挂。注：更新一代旗舰已是 Qwen3.5-plus / Qwen3.6-plus / Qwen3.7-plus / Qwen3-coder-plus（均 1M context），若需长上下文应优先这些。",
       "tags": [
-        "glm",
+        "qwen",
+        "plan"
+      ]
+    },
+    {
+      "id": "qwen3.7-plus",
+      "label": "Qwen3.7 Plus",
+      "aliases": [
+        "qwen3.7-plus-latest"
+      ],
+      "context_tokens": 1048576,
+      "max_output_tokens": 65536,
+      "reasoning_levels": [
+        "none",
+        "low",
+        "medium",
+        "high"
+      ],
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "notes": "Qwen 当前旗舰系列（Qwen3.5/3.6/3.7-plus 均 1M context），百亿级以上 MoE。适合长上下文 + 强推理场景。",
+      "tags": [
+        "qwen",
+        "long-context",
         "reasoning"
       ]
     },
     {
-      "id": "qwen3.8-max",
-      "label": "Qwen3.8 Max",
-      "aliases": [],
-      "context_tokens": 262144,
-      "max_output_tokens": 16384,
-      "reasoning_levels": [
-        "none",
-        "low",
-        "medium",
-        "high"
-      ],
-      "input_modalities": [
-        "text"
-      ],
-      "output_modalities": [
-        "text"
-      ],
-      "notes": "百炼 Token Plan 可挂；长上下文。",
-      "tags": [
-        "qwen",
-        "plan",
-        "long-context"
-      ]
-    },
-    {
-      "id": "kimi-k2.6",
-      "label": "Kimi K2.6",
+      "id": "kimi-k3",
+      "label": "Kimi K3",
       "aliases": [
+        "kimi-k2.6",
         "kimi-k2.5"
       ],
-      "context_tokens": 262144,
-      "max_output_tokens": 16384,
+      "context_tokens": 1048576,
+      "max_output_tokens": 65536,
       "reasoning_levels": [
-        "none",
-        "medium"
-      ],
-      "input_modalities": [
-        "text"
-      ],
-      "output_modalities": [
-        "text"
-      ],
-      "notes": "",
-      "tags": [
-        "kimi",
-        "long-context"
-      ]
-    },
-    {
-      "id": "minimax-m2.7",
-      "label": "MiniMax M2.7",
-      "aliases": [
-        "minimax-m2.5",
-        "minimax-m3"
-      ],
-      "context_tokens": 200000,
-      "max_output_tokens": 8192,
-      "reasoning_levels": [
-        "none",
-        "medium"
-      ],
-      "input_modalities": [
-        "text"
-      ],
-      "output_modalities": [
-        "text"
-      ],
-      "notes": "",
-      "tags": [
-        "minimax"
-      ]
-    },
-    {
-      "id": "claude-sonnet-5",
-      "label": "Claude Sonnet 5",
-      "aliases": [],
-      "context_tokens": 200000,
-      "max_output_tokens": 16384,
-      "reasoning_levels": [
-        "none",
         "low",
-        "medium",
-        "high"
+        "high",
+        "max"
       ],
       "input_modalities": [
         "text",
@@ -216,10 +164,154 @@
       "output_modalities": [
         "text"
       ],
-      "notes": "走 Claude 中转时上游常要求 Claude Code 特征头（见端点的附加请求头）。",
+      "notes": "2026-07-16 发布，开源 3T 级模型（2.8 万亿总参数 / 每 token 激活约 1040 亿，896 个路由专家激活 16 个）。原生视觉理解，1M context。推理默认 max，另有 low/high。API id kimi-k3，Kimi Code 用 k3。",
+      "tags": [
+        "kimi",
+        "long-context",
+        "open-weight",
+        "vision"
+      ]
+    },
+    {
+      "id": "minimax-m3",
+      "label": "MiniMax M3",
+      "aliases": [
+        "minimax-m2.7",
+        "minimax-m2.5",
+        "MiniMaxAI/MiniMax-M3"
+      ],
+      "context_tokens": 1048576,
+      "max_output_tokens": 524288,
+      "reasoning_levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "input_modalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "notes": "2026 年发布，427B MoE，MSA（MiniMax Sparse Attention）稀疏注意力架构。同时具备前沿编程/Agent 能力、1M context 与原生多模态（图/视频输入，可操控桌面）。最大输出 512K。",
+      "tags": [
+        "minimax",
+        "long-context",
+        "open-weight",
+        "vision"
+      ]
+    },
+    {
+      "id": "claude-opus-5",
+      "label": "Claude Opus 5",
+      "aliases": [],
+      "context_tokens": 1048576,
+      "max_output_tokens": 131072,
+      "reasoning_levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "notes": "Anthropic 当前最强，面向复杂 Agent 编程与企业级工作。Adaptive thinking 常开，默认 effort high。定价 $5 输入 / $25 输出（每 1M）。走 Claude 中转时上游常要求 Claude Code 特征头（见端点的附加请求头）。",
+      "tags": [
+        "anthropic",
+        "vision",
+        "reasoning"
+      ]
+    },
+    {
+      "id": "claude-sonnet-5",
+      "label": "Claude Sonnet 5",
+      "aliases": [],
+      "context_tokens": 1048576,
+      "max_output_tokens": 131072,
+      "reasoning_levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "notes": "速度与智能的平衡档，Claude Code 默认模型。context 1M / 最大输出 128K（Batch beta 可达 300K）。Adaptive thinking 默认开启；手动 budget_tokens 不受支持，用 thinking.type=adaptive；非默认 temperature/top_p/top_k 会 400。定价 $2 输入 / $10 输出（推广期，之后约 $3/$15）。",
       "tags": [
         "anthropic",
         "vision"
+      ]
+    },
+    {
+      "id": "claude-fable-5-1",
+      "label": "Claude Fable 5.1",
+      "aliases": [
+        "claude-fable-5"
+      ],
+      "context_tokens": 1048576,
+      "max_output_tokens": 131072,
+      "reasoning_levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "notes": "Anthropic 旗舰推理模型（Mythos 级），面向高难度推理与长程 Agent。context 1M / 输出 128K，知识截止 2026-06。思考不可关闭，思维 token 按输出计费。定价 $10/$50，与 GPT-6 Astra 持平。",
+      "tags": [
+        "anthropic",
+        "vision",
+        "reasoning"
+      ]
+    },
+    {
+      "id": "gpt-6-astra",
+      "label": "GPT-6 Astra",
+      "aliases": [],
+      "context_tokens": 1050000,
+      "max_output_tokens": 128000,
+      "reasoning_levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "notes": "2026-09-03 发布，OpenAI 旗舰。context 1,050,000 / 输出 128K；优势在 Agent 与 computer-use 执行。推理档位 low/medium/high/xhigh/max，无 none。⚠️ 不支持 temperature、top_p、logprobs、top_logprobs，传入会报错。定价 $10/$50（缓存 $1）；输入超过约 272K 触发长上下文加价。",
+      "tags": [
+        "openai",
+        "vision",
+        "long-context"
       ]
     },
     {
@@ -228,13 +320,15 @@
       "aliases": [
         "gpt-5.6-luna"
       ],
-      "context_tokens": 400000,
-      "max_output_tokens": 32768,
+      "context_tokens": 1050000,
+      "max_output_tokens": 128000,
       "reasoning_levels": [
         "none",
         "low",
         "medium",
-        "high"
+        "high",
+        "xhigh",
+        "max"
       ],
       "input_modalities": [
         "text",
@@ -243,9 +337,70 @@
       "output_modalities": [
         "text"
       ],
-      "notes": "默认只作最后兜底（rule: never）。",
+      "notes": "2026-07-09 发布。context 1,050,000 / 输出 128K。定价 $4/$20（促销价）。本端点常作为最后兜底（rule: never）。",
       "tags": [
         "openai",
+        "vision"
+      ]
+    },
+    {
+      "id": "gemini-3.1-pro",
+      "label": "Gemini 3.1 Pro",
+      "aliases": [
+        "gemini-3-pro"
+      ],
+      "context_tokens": 1048576,
+      "max_output_tokens": 65536,
+      "reasoning_levels": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
+      "input_modalities": [
+        "text",
+        "image",
+        "audio",
+        "video",
+        "pdf"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "notes": "Google 旗舰。1M context / 输出 64K。原生多模态（音视频 PDF 输入）。思考档位 minimal/low/medium/high，用 thinking level 参数（非 budget）；缺 thought signature 会 400。定价 $2/$12（≤200K），长上下文翻倍。",
+      "tags": [
+        "google",
+        "vision",
+        "long-context"
+      ]
+    },
+    {
+      "id": "gemini-3-flash",
+      "label": "Gemini 3 Flash",
+      "aliases": [
+        "gemini-3-flash-preview"
+      ],
+      "context_tokens": 1048576,
+      "max_output_tokens": 65536,
+      "reasoning_levels": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
+      "input_modalities": [
+        "text",
+        "image",
+        "audio",
+        "video",
+        "pdf"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "notes": "Agent 主力性价比款，能力接近 Pro 级 Agent/编程/多模态。1M context / 输出 64K。思考档位同 Pro；high 为默认。",
+      "tags": [
+        "google",
         "vision"
       ]
     }

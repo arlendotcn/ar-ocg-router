@@ -164,7 +164,6 @@ fn account_cfg_json(a: &AccountCfg) -> Value {
         "key": if is_secret_ref(&a.key) { a.key.clone() } else { KEY_UNCHANGED.to_string() },
         "model": a.model,
         "modes": modes_json(&a.modes),
-        "weight": a.weight,
         "rules": a.rules.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
         "no_error_fallback": a.no_error_fallback,
         "inject_session": a.inject_session,
@@ -249,11 +248,6 @@ fn router_json(cfg: &Config) -> Value {
         "skip_after_failures": r.skip_after_failures,
         "skip_secs": r.skip_secs,
         "attempt_budget_secs": r.attempt_budget_secs,
-        "selection": match r.selection {
-            crate::config::Selection::Weighted => "weighted",
-            crate::config::Selection::RoundRobin => "round_robin",
-            crate::config::Selection::LowestQuota => "lowest_quota",
-        },
         "session_affinity": r.session_affinity,
         "session_affinity_ttl_secs": r.session_affinity_ttl_secs,
         "session_fallback": r.session_fallback.as_str(),
@@ -342,7 +336,6 @@ fn doc_to_yaml(doc: &Value, existing: &Config) -> Result<String, String> {
     out.push_str(&format!("  skip_after_failures: {}\n", int_at(router, "skip_after_failures").unwrap_or(3)));
     out.push_str(&format!("  skip_secs: {}\n", int_at(router, "skip_secs").unwrap_or(300)));
     out.push_str(&format!("  attempt_budget_secs: {}\n", int_at(router, "attempt_budget_secs").unwrap_or(120)));
-    out.push_str(&format!("  selection: {}\n", yaml_str(str_at(router, "selection").unwrap_or("weighted"))));
     out.push_str(&format!("  session_affinity: {}\n", bool_at(router, "session_affinity").unwrap_or(true)));
     out.push_str(&format!("  session_affinity_ttl_secs: {}\n", int_at(router, "session_affinity_ttl_secs").unwrap_or(1800)));
     out.push_str(&format!("  session_fallback: {}\n", yaml_str(str_at(router, "session_fallback").unwrap_or("process"))));
@@ -377,6 +370,7 @@ fn doc_to_yaml(doc: &Value, existing: &Config) -> Result<String, String> {
     for (section, kind) in [("plans", AccountKind::Plans), ("fallback", AccountKind::Cash)] {
         out.push_str(&format!("\n{}:\n", section));
         let mut any = false;
+        let mut position = 0;
         for e in endpoints {
             // A missing kind belongs to the section being emitted, and "cash" is accepted as an
             // alias for the wire name "fallback": defaulting a nameless endpoint to plans moved a
@@ -387,7 +381,8 @@ fn doc_to_yaml(doc: &Value, existing: &Config) -> Result<String, String> {
                 continue;
             }
             any = true;
-            out.push_str(&endpoint_yaml(e, &old_by_name)?);
+            position += 1;
+            out.push_str(&endpoint_yaml(e, &old_by_name, position)?);
         }
         if !any {
             out.push_str("  []\n");
@@ -402,6 +397,8 @@ fn doc_to_yaml(doc: &Value, existing: &Config) -> Result<String, String> {
 fn endpoint_yaml(
     e: &Value,
     old: &std::collections::HashMap<&str, &AccountCfg>,
+    // 1-based position inside its own section; becomes "order".
+    position: i32,
 ) -> Result<String, String> {
     let name = str_at(e, "name").unwrap_or("").trim().to_string();
     let url = str_at(e, "url").unwrap_or("").trim().trim_end_matches('/').to_string();
@@ -456,9 +453,9 @@ fn endpoint_yaml(
     let modes = if modes.is_empty() { vec!["both".to_string()] } else { modes };
     s.push_str(&format!("mode: {}\n", yaml_str(&modes.join(","))));
     s.push_str(cont);
-    s.push_str(&format!("order: {}\n", int_at(e, "order").unwrap_or(10)));
-    s.push_str(cont);
-    s.push_str(&format!("weight: {}\n", int_at(e, "weight").unwrap_or(50)));
+    // Derived, never taken from the document: the console renumbers from the row position, so
+    // the sequence the user arranged by dragging is what the file says and what the router uses.
+    s.push_str(&format!("order: {}\n", position * 10));
     s.push_str(cont);
     // Written for every kind. The parser applies the rule list to plans and cash accounts alike,
     // so emitting it only for cash silently reset a plan's rules to [always] on the next save.
@@ -1155,7 +1152,8 @@ fn endpoint_models(state: &Arc<AppState>, req: &Request, out: &mut Responder, na
 fn library_get(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
     let cfg = state.cfg();
     let lib = crate::library::load(&cfg.path);
-    json_response(req, out, 200, &crate::library::to_json(&lib));
+    let stamp = crate::library::updated_stamp(&cfg.path);
+    json_response(req, out, 200, &crate::library::to_json(&lib, stamp.as_deref()));
 }
 
 fn library_put(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
@@ -1167,7 +1165,8 @@ fn library_put(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
     match crate::library::save(&cfg.path, &doc) {
         Ok(lib) => {
             log_info!("model library updated ({} entries)", lib.entries.len());
-            json_response(req, out, 200, &crate::library::to_json(&lib));
+            let stamp = crate::library::updated_stamp(&cfg.path);
+            json_response(req, out, 200, &crate::library::to_json(&lib, stamp.as_deref()));
         }
         Err(e) => error_response(req, out, 400, &e),
     }

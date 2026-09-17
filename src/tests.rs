@@ -334,7 +334,6 @@ fn sample_config_parses_with_expected_defaults() {
     let go = c.find("go-1").unwrap();
     assert_eq!(go.kind, config::AccountKind::Plans);
     assert_eq!(go.modes, vec![models::Mode::Chat]);
-    assert_eq!(go.weight, 60);
     assert_eq!(go.provider, models::ProviderKind::OpencodeGo);
     assert_eq!(go.quota.probe, config::QuotaProbe::Usage, "plans probe the usage endpoint");
     assert_eq!(go.quota.unit, config::QuotaUnit::Usd);
@@ -413,8 +412,10 @@ fn key_indirection_supports_env_and_file() {
     .is_err());
 }
 
+/// A retired key must not change anything, and must not make the file fail to load: silently
+/// ignoring it is how a config keeps working while quietly behaving differently.
 #[test]
-fn mode_and_weight_tolerate_alternate_spellings() {
+fn mode_tolerates_alternate_spellings_and_a_retired_weight_is_ignored() {
     let cfg = r#"
 plans:
   - name: go-a
@@ -434,7 +435,6 @@ fallback:
     let c = config::parse(cfg, std::path::Path::new("t")).unwrap();
     let go = c.find("go-a").unwrap();
     assert_eq!(go.modes.len(), 2);
-    assert_eq!(go.weight, 99, "weights are clamped to 0..99");
     let fb = c.find("fb-a").unwrap();
     assert_eq!(fb.modes, vec![models::Mode::Anthropic]);
     assert!(fb.no_error_fallback);

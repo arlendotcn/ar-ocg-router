@@ -53,7 +53,6 @@ export type Account = {
   model?: string;
   url: string;
   modes: string[];
-  weight: number;
   rules: string[];
   key: string;
   available: boolean;
@@ -124,13 +123,13 @@ export type QuotaCfg = {
 export type EndpointCfg = {
   name: string;
   kind: "plans" | "fallback";
+  /** Derived from the row position in its section; written by the server, never edited here. */
   order: number;
   provider: "opencodego" | "deepseek" | "generic";
   url: string;
   key: string;
   model: string;
   modes: string[];
-  weight: number;
   rules: string[];
   no_error_fallback: boolean;
   inject_session: boolean;
@@ -171,7 +170,6 @@ export type RouterCfg = {
   skip_after_failures: number;
   skip_secs: number;
   attempt_budget_secs: number;
-  selection: "weighted" | "round_robin" | "lowest_quota";
   session_affinity: boolean;
   session_affinity_ttl_secs: number;
   session_fallback: "process" | "per-request";

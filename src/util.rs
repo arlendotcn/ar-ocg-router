@@ -84,11 +84,6 @@ pub fn rand_u64() -> u64 {
     rng_next()
 }
 
-/// Uniform-ish f64 in [0, 1).
-pub fn rand_f64() -> f64 {
-    (rng_next() >> 11) as f64 / (1u64 << 53) as f64
-}
-
 pub fn rand_hex(len: usize) -> String {
     const HEX: &[u8] = b"0123456789abcdef";
     let mut out = String::with_capacity(len);

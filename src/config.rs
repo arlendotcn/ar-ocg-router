@@ -195,7 +195,6 @@ pub struct AccountCfg {
     /// translated, normalised or guessed, so a wrong id fails loudly at the upstream.
     pub model: String,
     pub modes: Vec<Mode>,
-    pub weight: u8,
     pub rules: Vec<Rule>,
     pub no_error_fallback: bool,
     pub drop_params: Vec<String>,
@@ -302,13 +301,6 @@ impl SessionFallback {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Selection {
-    Weighted,
-    RoundRobin,
-    LowestQuota,
-}
-
 #[derive(Debug, Clone)]
 pub struct ServerCfg {
     pub host: String,
@@ -375,7 +367,6 @@ pub struct RouterCfg {
     /// Wall-clock budget for the whole retry chain. Streaming requests only count the time until
     /// the first byte, so long generations are never cut off by it.
     pub attempt_budget_secs: u64,
-    pub selection: Selection,
     /// Keep a conversation on one endpoint. This is deterministic coordination, not optimisation:
     /// upstreams that scope prompt caches (or server-side conversation state) per session lose
     /// that feature when the session hops between endpoints. Only honoured while the endpoint is
@@ -409,7 +400,6 @@ impl Default for RouterCfg {
             skip_after_failures: 3,
             skip_secs: 300,
             attempt_budget_secs: 120,
-            selection: Selection::Weighted,
             session_affinity: true,
             session_affinity_ttl_secs: 1800,
             session_fallback: SessionFallback::Process,
@@ -552,12 +542,11 @@ impl Config {
         ));
         for a in &self.accounts {
             s.push_str(&format!(
-                " | [{}] {} url={} mode={} weight={} order={} quota={}/{} rules={} key={}",
+                " | [{}] {} url={} mode={} order={} quota={}/{} rules={} key={}",
                 a.kind.as_str(),
                 a.name,
                 a.base(),
                 a.modes.iter().map(|m| m.as_str()).collect::<Vec<_>>().join("+"),
-                a.weight,
                 a.order,
                 a.quota.unit.as_str(),
                 a.quota.probe.as_str(),
@@ -842,18 +831,6 @@ pub fn parse(raw: &str, path: &Path) -> Result<Config, String> {
         if let Some(v) = yget_any(m, &["retry_on_model_error"]) {
             router.retry_on_model_error = ybool(v, router.retry_on_model_error);
         }
-        if let Some(v) = yget_any(m, &["selection", "strategy"]) {
-            let t = ystr(v).unwrap_or_default().to_ascii_lowercase().replace('-', "_");
-            router.selection = match t.as_str() {
-                "weighted" | "weight" | "" => Selection::Weighted,
-                "round_robin" | "rr" | "roundrobin" => Selection::RoundRobin,
-                "lowest_quota" | "least_quota" | "headroom" => Selection::LowestQuota,
-                other => {
-                    warnings.push(format!("router.selection {:?} unknown, using weighted", other));
-                    Selection::Weighted
-                }
-            };
-        }
         if let Some(v) = yget_any(m, &["session_affinity", "sticky_session"]) {
             router.session_affinity = ybool(v, router.session_affinity);
         }
@@ -1004,11 +981,6 @@ pub fn parse(raw: &str, path: &Path) -> Result<Config, String> {
                     key, idx
                 ));
             }
-
-            let weight = yget_any(m, &["weight", "w"])
-                .map(|v| yint(v, 50))
-                .unwrap_or(50)
-                .clamp(0, 99) as u8;
 
             let mut rules: Vec<Rule> = Vec::new();
             let mut no_error_fallback = false;
@@ -1211,7 +1183,6 @@ pub fn parse(raw: &str, path: &Path) -> Result<Config, String> {
                 url,
                 key: keyval.trim().to_string(),
                 modes,
-                weight,
                 rules,
                 no_error_fallback,
                 drop_params,
@@ -1228,9 +1199,6 @@ pub fn parse(raw: &str, path: &Path) -> Result<Config, String> {
         return Err("no accounts configured: add at least one opencodego: or fallback: entry".to_string());
     }
 
-    if accounts.iter().all(|a| a.weight == 0) {
-        warnings.push("every account has weight 0 -> weighted selection would have nothing to pick; weights are treated as 1".to_string());
-    }
     if !accounts.iter().any(|a| a.kind == AccountKind::Plans) {
         warnings.push("no 'plans' account configured; the router will always use the cash accounts".to_string());
     }

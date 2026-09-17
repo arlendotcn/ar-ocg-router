@@ -7,6 +7,7 @@ import { useStatsStream } from "@/lib/use-stats";
 import { api } from "@/lib/api";
 import { useToast } from "@/components/ui/toast";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/field";
 import { Button } from "@/components/ui/button";
 import { Meter } from "@/components/ui/meter";
 import { Plate, PlateBlock, Readout } from "@/components/ui/plate";
@@ -66,9 +67,43 @@ export function DashboardPage() {
   const c = stats.counters;
   const plans = stats.accounts.filter((a) => a.kind === "plans");
   const cash = stats.accounts.filter((a) => a.kind === "fallback");
-  // The roster is the routing order, which is what the order field means. Ties keep the
-  // configured order (sort is stable), so equal orders stay side by side.
-  const roster = [...stats.accounts].sort((x, y) => x.order - y.order);
+  // The roster is the routing order, shown per side. "order" restarts at 10 inside each side, so
+  // a single global sort would interleave plans and cash; and dragging is only ever allowed
+  // within one side, since the two sides are separate queues.
+  const byOrder = (x: Account, y: Account) => x.order - y.order;
+  const roster = {
+    plans: stats.accounts.filter((a) => a.kind === "plans").sort(byOrder),
+    fallback: stats.accounts.filter((a) => a.kind === "fallback").sort(byOrder),
+  };
+
+  /// Move one endpoint inside its own side and save. The server renumbers "order" from the array
+  /// position, so this is the only thing the console has to get right.
+  const reorder = async (kind: "plans" | "fallback", from: number, to: number) => {
+    const list = roster[kind];
+    if (from === to || to < 0 || to >= list.length) return;
+    const movedNames = list.map((a) => a.name);
+    const [name] = movedNames.splice(from, 1);
+    movedNames.splice(to, 0, name);
+    try {
+      const doc = await api.config();
+      // Rebuild the endpoint array. The side being dragged keeps its own slots - only which
+      // endpoint sits in each slot changes - so the other side is left exactly where it was.
+      const slots = doc.endpoints.map((e, i) => ({ e, i })).filter(({ e }) => e.kind === kind);
+      const byName = new Map(slots.map(({ e }) => [e.name, e]));
+      const next = [...doc.endpoints];
+      movedNames.forEach((n, k) => {
+        const slot = slots[k];
+        const moved = byName.get(n);
+        if (slot && moved) next[slot.i] = moved;
+      });
+      const res = await api.saveConfig({ ...doc, endpoints: next });
+      if (res.reloaded === false) toast.push("err", t.common.notApplied);
+      else toast.push("ok", t.endpoints.moved);
+      refresh();
+    } catch (e) {
+      toast.push("err", e instanceof Error ? e.message : String(e));
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -81,12 +116,17 @@ export function DashboardPage() {
         }
         actions={
           <>
-            <Button size="sm" variant="ghost" onClick={() => setPaused(!paused)}>
-              {paused ? t.dash.resume : t.dash.pause}
-            </Button>
-            <Button size="sm" variant="outline" onClick={refresh}>
-              {t.common.refresh}
-            </Button>
+            <label className="mono flex cursor-pointer items-center gap-2 text-2xs uppercase tracking-[0.12em] text-[var(--ink-faint)]">
+              {t.dash.autoRefresh}
+              {/* checked means "the page keeps refreshing itself"; the manual button below only
+                  exists while that is off, so it is never a second way to do the same thing. */}
+              <Switch checked={!paused} onChange={(v) => setPaused(!v)} label={t.dash.autoRefresh} />
+            </label>
+            {paused ? (
+              <Button size="sm" variant="outline" onClick={refresh}>
+                {t.common.refresh}
+              </Button>
+            ) : null}
           </>
         }
       />
@@ -192,15 +232,21 @@ export function DashboardPage() {
           </div>
         ) : (
           <div className="divide-y divide-[var(--line)]">
-            {roster.map((a, i) => (
-              <AccountRow
-                key={a.name}
-                a={a}
-                index={i}
-                busy={busy === a.name}
-                onToggle={setEndpointEnabled}
-              />
-            ))}
+            {/* One list per side: rows can be dragged inside their own side and never across,
+                because plans and cash are separate queues with independent order sequences. */}
+            {(["plans", "fallback"] as const).map((kind) =>
+              roster[kind].length === 0 ? null : (
+                <RosterGroup
+                  key={kind}
+                  kind={kind}
+                  title={kind === "plans" ? t.endpoints.plans : t.endpoints.fallback}
+                  accounts={roster[kind]}
+                  busy={busy}
+                  onToggle={setEndpointEnabled}
+                  onReorder={(from, to) => void reorder(kind, from, to)}
+                />
+              ),
+            )}
           </div>
         )}
       </PlateBlock>
@@ -263,16 +309,118 @@ function SideSummary({ kind, accounts, used }: { kind: "plans" | "fallback"; acc
   );
 }
 
+/// One draggable side of the roster. The drag state lives here so a plan row can never be
+/// dropped among the cash rows: this list only ever contains one kind.
+function RosterGroup({
+  kind,
+  title,
+  accounts,
+  busy,
+  onToggle,
+  onReorder,
+}: {
+  kind: "plans" | "fallback";
+  title: string;
+  accounts: Account[];
+  busy: string | null;
+  onToggle: (name: string, enabled: boolean) => void;
+  onReorder: (from: number, to: number) => void;
+}) {
+  const { t } = useI18n();
+  const listRef = React.useRef<HTMLDivElement | null>(null);
+  const [drag, setDrag] = React.useState<{ from: number; over: number } | null>(null);
+
+  /// Index the pointer is over, or null when it has left this group. Returning null instead of
+  /// clamping is what stops a drag aimed past the section from teleporting the row to the end.
+  const dropIndexAt = (clientY: number): number | null => {
+    const host = listRef.current;
+    if (!host) return null;
+    const box = host.getBoundingClientRect();
+    if (clientY < box.top || clientY > box.bottom) return null;
+    const items = Array.from(host.querySelectorAll<HTMLElement>("[data-row]"));
+    for (let k = 0; k < items.length; k++) {
+      const r = items[k].getBoundingClientRect();
+      if (clientY < r.top + r.height / 2) return k;
+    }
+    return Math.max(0, items.length - 1);
+  };
+
+  const start = (index: number) => (ev: React.PointerEvent<HTMLElement>) => {
+    ev.preventDefault();
+    ev.currentTarget.setPointerCapture?.(ev.pointerId);
+    setDrag({ from: index, over: index });
+  };
+  const move = (ev: React.PointerEvent<HTMLElement>) => {
+    if (!drag) return;
+    const over = dropIndexAt(ev.clientY);
+    if (over === null || over === drag.over) return;
+    setDrag({ from: drag.from, over });
+  };
+  const end = () => {
+    // A drag that never entered this group leaves the order alone: dragging across the section
+    // boundary is not a reorder, it is a miss.
+    if (drag && drag.from !== drag.over) onReorder(drag.from, drag.over);
+    setDrag(null);
+  };
+
+  return (
+    <div ref={listRef} data-group={kind}>
+      <div className="bg-[var(--panel-2)] px-3 py-1.5 sm:px-4">
+        <span className="label">{title}</span>
+      </div>
+      {accounts.map((a, i) => {
+        const dragging = drag?.from === i;
+        const isDropTarget = drag !== null && drag.over === i && drag.from !== i;
+        return (
+          <div
+            key={a.name}
+            data-row={i}
+            className={cn(
+              "relative",
+              dragging && "opacity-70",
+              isDropTarget && (i < (drag?.from ?? 0) ? "shadow-[inset_0_2px_0_0_var(--signal)]" : "shadow-[inset_0_-2px_0_0_var(--signal)]"),
+            )}
+          >
+            <AccountRow
+              a={a}
+              index={i}
+              busy={busy === a.name}
+              onToggle={onToggle}
+              dragging={dragging}
+              onDragStart={start(i)}
+              onDragMove={move}
+              onDragEnd={end}
+              onStep={(delta) => onReorder(i, i + delta)}
+              dragLabel={t.endpoints.dragHandle}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 function AccountRow({
   a,
   index,
   busy,
   onToggle,
+  dragging,
+  onDragStart,
+  onDragMove,
+  onDragEnd,
+  onStep,
+  dragLabel,
 }: {
   a: Account;
   index: number;
   busy: boolean;
   onToggle: (name: string, enabled: boolean) => void;
+  dragging: boolean;
+  onDragStart: (ev: React.PointerEvent<HTMLElement>) => void;
+  onDragMove: (ev: React.PointerEvent<HTMLElement>) => void;
+  onDragEnd: () => void;
+  onStep: (delta: number) => void;
+  dragLabel: string;
 }) {
   const { t, lang } = useI18n();
   const [open, setOpen] = React.useState(false);
@@ -293,14 +441,35 @@ function AccountRow({
 
   return (
     <div className="rise" style={{ animationDelay: `${Math.min(index * 28, 240)}ms` }}>
-      <div className={cn("flex items-center", !enabled && "opacity-60")}>
+      <div className={cn("flex items-center", !enabled && "opacity-60", dragging && "bg-[var(--panel-2)]")}>
+        {/* Drag handle: pointer-draggable on touch and mouse, and arrow keys on the keyboard. */}
+        <button
+          type="button"
+          aria-label={dragLabel}
+          title={dragLabel}
+          className="mono ml-1 flex h-7 w-6 shrink-0 cursor-grab touch-none select-none items-center justify-center rounded-[2px] text-[var(--ink-faint)] transition-colors hover:bg-[var(--panel-2)] hover:text-[var(--ink-dim)] active:cursor-grabbing"
+          onPointerDown={onDragStart}
+          onPointerMove={onDragMove}
+          onPointerUp={onDragEnd}
+          onPointerCancel={onDragEnd}
+          onKeyDown={(ev) => {
+            if (ev.key === "ArrowUp") {
+              ev.preventDefault();
+              onStep(-1);
+            } else if (ev.key === "ArrowDown") {
+              ev.preventDefault();
+              onStep(1);
+            }
+          }}
+        >
+          ⋮⋮
+        </button>
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
-          className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-[var(--panel-2)] sm:px-4"
+          className="flex min-w-0 flex-1 items-center gap-3 px-1 py-2.5 text-left transition-colors hover:bg-[var(--panel-2)] sm:px-2"
           aria-expanded={open}
         >
-          <span className="mono w-[18px] shrink-0 text-2xs text-[var(--ink-faint)]">{a.order}</span>
           <span className="h-8 w-[2px] shrink-0 rounded-full" style={{ background: tone }} />
           <span className="min-w-0 flex-1">
             <span className="flex items-center gap-2">
@@ -419,7 +588,16 @@ function AccountDetail({ a }: { a: Account }) {
             v={q.source === "remote" ? t.dash.sourceRemote : q.source === "local" ? t.dash.sourceLocal : t.dash.sourceUnknown}
           />
           <Row k={t.dash.todayTokens} v={`${fmtNum(a.stats.prompt_tokens)} / ${fmtNum(a.stats.completion_tokens)}`} />
-          <Row k={t.dash.cached} v={fmtNum(a.stats.cached_tokens)} />
+          {/* Cache hits as a share of the prompt: the raw count alone cannot tell 3k hits out of
+              300k input from 3k out of 4k. */}
+          <Row
+            k={t.dash.cached}
+            v={
+              a.stats.prompt_tokens > 0
+                ? `${fmtNum(a.stats.cached_tokens)} (${fmtPct((a.stats.cached_tokens / a.stats.prompt_tokens) * 100)})`
+                : fmtNum(a.stats.cached_tokens)
+            }
+          />
           <Row k={t.dash.streams} v={fmtNum(a.stats.stream_requests)} />
           <Row k="latency" v={`${fmtNum(a.stats.avg_latency_ms)} ms`} />
           <Row k={t.dash.lastUsed} v={fmtAgo(a.stats.last_used, lang)} />

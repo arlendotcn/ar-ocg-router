@@ -15,8 +15,7 @@
 | 闲时（现金半价） | `surplus_first` | `plans-surplus` → `fallback` → `plans-tight` |
 | 闲时 | `plans` / `fallback` | 该侧优先 |
 
-桶内：先按 `order` 升序，再按同层策略（`weighted`、`round_robin`、`lowest_quota`）。
-`weight: 0` 的账号沉到末尾。
+桶内：按 `order` 升序。该值由条目位置推导，所以在控制台里拖拽出的顺序就是这里使用的顺序。
 
 第二轮会把剩下所有还能用的都补上作为最后兜底，包括冷却中的端点，除非它主动退出。
 

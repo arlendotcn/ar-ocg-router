@@ -13,7 +13,7 @@
 #
 #  忙时 = 周一~周五 01:00-04:00、06:00-10:00 (UTC)；其余含周末为闲时（官方单价减半）
 #  闲时顺序：预计用不完的 plan → 现金 → 留给忙时的 plan；忙时：所有 plan → 现金
-#  同段内 order 较小的优先使用；同一 order 内按 weight 分摊（weight 不是优先级）
+#  同段内 order 较小的优先使用；order 由列表位置推导，在控制台里拖拽调整即可
 #
 #  name 规则：显式优先（重名自动 -2/-3）；缺省生成 <provider>-<model>-<key指纹>
 # ============================================================================
@@ -36,7 +36,6 @@ router:
   surplus_max_pct: 80
   surplus_projection: true
   quota_refresh_secs: 60
-  selection: weighted        # 同一 order 内：weighted | round_robin | lowest_quota
   # 会话亲和：同一会话固定同一端点，保住上游的会话/缓存语义（这是确定性协调，不是成本优化）。
   # 端点不健康时会自动放弃粘性。
   session_affinity: true
@@ -76,7 +75,6 @@ plans:
     model: deepseek-flash
     mode: both
     order: 10
-    weight: 60
     inject_session: true                      # Go 要求 x-opencode-session，显式开启
     quota: { unit: usd, rolling: 12, weekly: 30, monthly: 60, probe: usage }
 
@@ -88,7 +86,6 @@ plans:
     model: deepseek-v4.1-flash
     mode: both
     order: 20
-    weight: 50
     quota: { probe: none }
 
   # ---- 阿里百炼 Token Plan / Qwen3.8-Max（另一条端点；同一 key 可写多份）----
@@ -99,7 +96,6 @@ plans:
   #   model: qwen3.8-max
   #   mode: both
   #   order: 21
-  #   weight: 50
   #   quota: { probe: none }
 
   # ---- 火山方舟 Coding Plan / GLM-5.3-Flash（实测白名单内可用）----
@@ -110,7 +106,6 @@ plans:
     model: glm-5.3-flash
     mode: both
     order: 30
-    weight: 50
     quota: { probe: none }
 
   # ---- 火山方舟 Coding Plan / Kimi K2 ----
@@ -121,7 +116,6 @@ plans:
   #   model: kimi-k2-250905
   #   mode: both
   #   order: 31
-  #   weight: 50
   #   quota: { probe: none }
 
 # ============================================================================
@@ -136,7 +130,6 @@ fallback:
     model: deepseek-flash
     mode: both
     order: 10
-    weight: 50
     rule: [offpeak, quota_low]
     quota: { probe: balance }
 
@@ -148,7 +141,6 @@ fallback:
   #   model: deepseek-v4-pro
   #   mode: both
   #   order: 11
-  #   weight: 50
   #   rule: [offpeak, quota_low]
   #   quota: { probe: balance }
 
@@ -160,7 +152,6 @@ fallback:
     model: gpt-5.6-sol
     mode: both
     order: 90
-    weight: 50
     rule: never
     quota: { probe: none }
 
@@ -172,7 +163,6 @@ fallback:
   #   model: claude-sonnet-5
   #   mode: anthropic-messages
   #   order: 91
-  #   weight: 50
   #   rule: never
   #   headers:
   #     user-agent: claude-cli/2.1.0 (external, cli)
@@ -186,6 +176,5 @@ fallback:
   #   model: ornith-1.5-35b-a3b
   #   mode: both
   #   order: 95
-  #   weight: 50
   #   rule: never
   #   quota: { probe: none }

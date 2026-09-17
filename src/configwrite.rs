@@ -15,7 +15,7 @@ use serde_yaml::{Mapping, Value as Y};
 
 use crate::config::{
     AccountCfg, AccountKind, CompatCfg, Config, IdlePrefer, LogCfg, QuotaCfg, RouterCfg,
-    RouterMode, Rule, Selection, ServerCfg,
+    RouterMode, Rule, ServerCfg,
 };
 use crate::models::{Mode, ProviderKind};
 
@@ -92,14 +92,6 @@ fn idle_prefer_str(p: IdlePrefer) -> &'static str {
     }
 }
 
-fn selection_str(s: Selection) -> &'static str {
-    match s {
-        Selection::Weighted => "weighted",
-        Selection::RoundRobin => "round_robin",
-        Selection::LowestQuota => "lowest_quota",
-    }
-}
-
 /// ","-joined Mode::as_str() list, with exactly {Chat, Responses} collapsed to "both".
 fn modes_str(modes: &[Mode]) -> String {
     if modes == [Mode::Chat, Mode::Responses] {
@@ -143,8 +135,9 @@ pub fn account_to_yaml(a: &AccountCfg, compat_drop: &[String]) -> Y {
     m.insert(ystr("key"), ystr(&a.key));
     m.insert(ystr("model"), ystr(&a.model));
     m.insert(ystr("mode"), ystr(&modes_str(&a.modes)));
+    // Written for transparency (a human can read the sequence off the file), but it is derived:
+    // the console renumbers it from the row position on every save, and it is never edited by hand.
     m.insert(ystr("order"), Y::Number(serde_yaml::Number::from(a.order)));
-    m.insert(ystr("weight"), yu64(a.weight as u64));
     // Rules only matter for cash accounts; plans use them implicitly.
     if a.kind == AccountKind::Cash && !rules_are_default(&a.rules) {
         m.insert(ystr("rule"), yseq_str(a.rules.iter().map(|r| r.as_str())));
@@ -224,7 +217,6 @@ fn router_yaml(r: &RouterCfg) -> Y {
         ("skip_after_failures", Y::Number(serde_yaml::Number::from(r.skip_after_failures as u64))),
         ("skip_secs", yu64(r.skip_secs)),
         ("attempt_budget_secs", yu64(r.attempt_budget_secs)),
-        ("selection", ystr(selection_str(r.selection))),
         ("session_affinity", ybool(r.session_affinity)),
         ("session_affinity_ttl_secs", yu64(r.session_affinity_ttl_secs)),
         ("session_fallback", ystr(r.session_fallback.as_str())),
@@ -504,7 +496,6 @@ router:
   skip_after_failures: 4
   skip_secs: 33
   attempt_budget_secs: 44
-  selection: round_robin
   session_affinity: false
   session_affinity_ttl_secs: 55
   session_fallback: per-request
@@ -641,10 +632,6 @@ fallback:
         assert_eq!(reparsed.router.skip_after_failures, original.router.skip_after_failures);
         assert_eq!(reparsed.router.skip_secs, original.router.skip_secs);
         assert_eq!(reparsed.router.attempt_budget_secs, original.router.attempt_budget_secs);
-        assert_eq!(
-            selection_str(reparsed.router.selection),
-            selection_str(original.router.selection)
-        );
         assert_eq!(reparsed.router.session_affinity, original.router.session_affinity);
         assert_eq!(
             reparsed.router.session_affinity_ttl_secs,
@@ -686,7 +673,6 @@ fallback:
             assert_eq!(got.key, want.key);
             assert_eq!(got.model, want.model);
             assert_eq!(modes_of(got), modes_of(want));
-            assert_eq!(got.weight, want.weight);
             assert_eq!(rules_of(got), rules_of(want));
             assert_eq!(got.extra_headers, want.extra_headers);
             assert_eq!(got.quota.unit.as_str(), want.quota.unit.as_str());
@@ -766,10 +752,7 @@ fallback:
         );
         // keys come out in the documented order
         let acc_keys: Vec<&str> = plan_one.keys().map(|k| k.as_str().unwrap()).collect();
-        assert_eq!(
-            acc_keys,
-            vec!["name", "url", "key", "model", "mode", "order", "weight", "quota"]
-        );
+        assert_eq!(acc_keys, vec!["name", "url", "key", "model", "mode", "order", "quota"]);
 
         let cash = root.get(Y::String("fallback".into())).unwrap().as_sequence().unwrap();
         let cash_one = cash[0].as_mapping().unwrap();

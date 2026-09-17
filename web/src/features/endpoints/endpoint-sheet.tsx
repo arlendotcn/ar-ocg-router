@@ -194,25 +194,9 @@ export function EndpointSheet({
                 ))}
               </Select>
             </Field>
-            <Field label={t.endpoints.order} help={t.endpoints.orderHint}>
-              <Input
-                type="number"
-                value={draft.order}
-                onChange={(e) => set("order", Number(e.target.value) || 0)}
-              />
-            </Field>
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2">
-            <Field label={t.endpoints.weight} help={t.endpoints.weightHint}>
-              <Input
-                type="number"
-                min={0}
-                max={99}
-                value={draft.weight}
-                onChange={(e) => set("weight", Math.max(0, Math.min(99, Number(e.target.value) || 0)))}
-              />
-            </Field>
             {draft.kind === "fallback" ? (
               <Field label={t.endpoints.rule} help={t.endpoints.ruleHint} hint={t.rules[(draft.rules[0] ?? "always") as keyof typeof t.rules]}>
                 <Select
@@ -454,6 +438,5 @@ function validate(e: EndpointCfg): string[] {
   if (!e.model.trim()) out.push("model is required: one endpoint serves exactly one model");
   if (!e.key.trim()) out.push("key is required (env:VAR and file:path are allowed)");
   if (e.url.endsWith("/")) out.push("url should not end with a slash");
-  if (e.weight < 0 || e.weight > 99) out.push("weight must be between 0 and 99");
   return out;
 }

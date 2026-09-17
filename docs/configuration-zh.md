@@ -31,7 +31,6 @@ plans:
     model: deepseek-flash
     mode: both
     order: 10
-    weight: 60
     inject_session: true
     quota: { unit: usd, rolling: 12, weekly: 30, monthly: 60, probe: usage }
 
@@ -43,7 +42,6 @@ fallback:
     model: deepseek-flash
     mode: both
     order: 10
-    weight: 50
     rule: [offpeak, quota_low]
     quota: { probe: balance }
 ```
@@ -58,8 +56,7 @@ fallback:
 | `key` | 明文、`env:VAR` 或 `file:/path/key.txt`。 |
 | `model` | **必填。** 该端点唯一会发出的模型 id，原样透传。写错会在上游报错并自动换下一个。 |
 | `mode` | `openai-completion` / `openai-responses` / `anthropic-messages` / `both` / `any`，也可写列表。 |
-| `order` | 同一列表内的消耗顺序，越小越先。默认按书写顺序。 |
-| `weight` | 0~99，**同一个 `order` 内**的分摊权重。**不是优先级**。`0` 表示「只在其它都不可用时才用」。 |
+| `order` | 同一列表内的消耗顺序，越小越先。由条目位置推导，每次保存都会按位置重写——请在控制台里拖拽调整，不要手改。 |
 | `rule` | 仅 `fallback`：允许它**作为首选**的条件。见下。 |
 | `inject_session` | 发送 `x-opencode-session`。OpenCode Go 要求必须带。 |
 | `headers` | 附加请求头（部分中转要求客户端特征头）。 |
@@ -93,7 +90,6 @@ fallback:
 | `surplus_max_pct` | 80 | 任一窗口达到该百分比即视为额度紧张。 |
 | `surplus_projection` | true | 按窗口进度线性外推；预计用不完的套餐也算充裕。 |
 | `exhaust_at_pct` | 99 | 达到该百分比后不再优先使用该套餐。 |
-| `selection` | `weighted` | 同一个 `order` 内：`weighted`、`round_robin`、`lowest_quota`。 |
 | `session_affinity` | true | 同一会话固定同一端点，保住上游的会话与缓存语义。 |
 | `session_affinity_ttl_secs` | 1800 | 绑定有效期。 |
 | `session_fallback` | `process` | 客户端没传会话头时用什么：`process`（缓存更稳）或 `per-request`。 |

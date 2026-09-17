@@ -25,7 +25,6 @@ const BLANK: EndpointCfg = {
   key: "",
   model: "",
   modes: ["both"],
-  weight: 50,
   rules: ["always"],
   no_error_fallback: false,
   inject_session: false,
@@ -65,10 +64,25 @@ export function EndpointsPage() {
 
   // Rows are shown in routing order, which is what "order" means. The index is kept from the
   // original array so edit/remove still address the right endpoint after sorting.
+  // Array position IS the consumption order: the server renumbers "order" from it on every save.
+  // No sorting here, and the order value is never shown - the list is the sequence.
   const rows = (doc?.endpoints ?? []).map((e, i) => ({ e, i }));
-  const byOrder = (x: { e: EndpointCfg }, y: { e: EndpointCfg }) => x.e.order - y.e.order;
-  const plans = rows.filter(({ e }) => e.kind === "plans").sort(byOrder);
-  const cash = rows.filter(({ e }) => e.kind === "fallback").sort(byOrder);
+  const plans = rows.filter(({ e }) => e.kind === "plans");
+  const cash = rows.filter(({ e }) => e.kind === "fallback");
+
+  /// Move one row inside its own section. Only the section's own slots are permuted, so a plan
+  /// can never jump across the cash endpoints that sit after it in the same array.
+  const reorder = (section: { e: EndpointCfg; i: number }[], from: number, to: number) => {
+    if (!doc || from === to || to < 0 || to >= section.length) return;
+    const moved = [...section];
+    const [item] = moved.splice(from, 1);
+    moved.splice(to, 0, item);
+    const next = [...doc.endpoints];
+    section.forEach((slot, k) => {
+      next[slot.i] = moved[k].e;
+    });
+    void persist(next, t.endpoints.moved);
+  };
 
   const add = (kind: "plans" | "fallback") => {
     const maxOrder = Math.max(0, ...(doc?.endpoints ?? []).filter((e) => e.kind === kind).map((e) => e.order));
@@ -168,6 +182,7 @@ export function EndpointsPage() {
         onRemove={remove}
         onLiveToggle={liveToggle}
         onDuplicate={duplicate}
+        onReorder={(from, to) => reorder(plans, from, to)}
         liveByName={liveByName}
       />
       <SideList
@@ -179,6 +194,7 @@ export function EndpointsPage() {
         onRemove={remove}
         onLiveToggle={liveToggle}
         onDuplicate={duplicate}
+        onReorder={(from, to) => reorder(cash, from, to)}
         liveByName={liveByName}
       />
 
@@ -210,6 +226,7 @@ function SideList({
   onRemove,
   onLiveToggle,
   onDuplicate,
+  onReorder,
   liveByName,
 }: {
   kind: "plans" | "fallback";
@@ -220,27 +237,91 @@ function SideList({
   onRemove: (index: number) => void;
   onLiveToggle: (name: string, enabled: boolean) => void;
   onDuplicate: (name: string) => void;
+  onReorder: (from: number, to: number) => void;
   liveByName: Map<string, { requests: number; saved: number; cost: number; available: boolean }>;
 }) {
   const { t } = useI18n();
   const tone = kind === "plans" ? "var(--plans)" : "var(--cash)";
+  // Row indices are positions inside THIS section; the page maps them back to document slots.
+  const listRef = React.useRef<HTMLDivElement | null>(null);
+  const [drag, setDrag] = React.useState<{ from: number; over: number } | null>(null);
+
+  /// Index the pointer is over, or null once it has left this section. Returning null rather than
+  /// clamping keeps a drag aimed past the section boundary from teleporting the row to the end.
+  const dropIndexAt = (clientY: number): number | null => {
+    const host = listRef.current;
+    if (!host) return null;
+    const box = host.getBoundingClientRect();
+    if (clientY < box.top || clientY > box.bottom) return null;
+    const items = Array.from(host.querySelectorAll<HTMLElement>("[data-row]"));
+    for (let k = 0; k < items.length; k++) {
+      const r = items[k].getBoundingClientRect();
+      if (clientY < r.top + r.height / 2) return k;
+    }
+    return items.length - 1;
+  };
+
+  const startDrag = (index: number) => (ev: React.PointerEvent<HTMLElement>) => {
+    ev.preventDefault();
+    ev.currentTarget.setPointerCapture?.(ev.pointerId);
+    setDrag({ from: index, over: index });
+  };
+  const moveDrag = (ev: React.PointerEvent<HTMLElement>) => {
+    if (!drag) return;
+    const over = dropIndexAt(ev.clientY);
+    if (over === null || over === drag.over) return;
+    setDrag({ from: drag.from, over });
+  };
+  const endDrag = () => {
+    if (drag && drag.from !== drag.over) onReorder(drag.from, drag.over);
+    setDrag(null);
+  };
+
   return (
     <PlateBlock title={title} hint={hint}>
       {rows.length === 0 ? (
         <div className="px-4 py-6 text-center text-sm text-[var(--ink-faint)]">{t.common.empty}</div>
       ) : (
-        <div className="divide-y divide-[var(--line)]">
-          {rows.map(({ e, i }) => {
+        <div ref={listRef} className="divide-y divide-[var(--line)]">
+          {rows.map(({ e, i }, k) => {
             const live = liveByName.get(e.name);
             const enabled = e.enabled !== false;
+            const dragging = drag?.from === k;
+            const isDropTarget = drag !== null && drag.over === k && drag.from !== k;
             return (
               <div
                 key={`${e.name}-${i}`}
-                className={cn("flex flex-col gap-2 px-3 py-3 transition-colors sm:flex-row sm:items-center sm:gap-3 sm:px-4", !enabled && "opacity-55")}
+                data-row={k}
+                className={cn(
+                  "flex flex-col gap-2 px-3 py-3 transition-colors sm:flex-row sm:items-center sm:gap-3 sm:px-4",
+                  !enabled && "opacity-55",
+                  dragging && "bg-[var(--panel-2)] opacity-70",
+                  isDropTarget && (k < (drag?.from ?? 0) ? "shadow-[inset_0_2px_0_0_var(--signal)]" : "shadow-[inset_0_-2px_0_0_var(--signal)]"),
+                )}
               >
                 <span className="h-[3px] w-full shrink-0 rounded-full sm:hidden" style={{ background: tone }} />
                 <div className="flex min-w-0 flex-1 items-center gap-2.5 sm:gap-3">
-                  <span className="mono w-7 shrink-0 tabular text-2xs text-[var(--ink-faint)]">{e.order}</span>
+                  <button
+                    type="button"
+                    aria-label={t.endpoints.dragHandle}
+                    title={t.endpoints.dragHandle}
+                    className="mono flex h-7 w-6 shrink-0 cursor-grab touch-none select-none items-center justify-center rounded-[2px] text-[var(--ink-faint)] transition-colors hover:bg-[var(--panel-2)] hover:text-[var(--ink-dim)] active:cursor-grabbing"
+                    onPointerDown={startDrag(k)}
+                    onPointerMove={moveDrag}
+                    onPointerUp={endDrag}
+                    onPointerCancel={endDrag}
+                    onKeyDown={(ev) => {
+                      if (ev.key === "ArrowUp") {
+                        ev.preventDefault();
+                        onReorder(k, k - 1);
+                      } else if (ev.key === "ArrowDown") {
+                        ev.preventDefault();
+                        onReorder(k, k + 1);
+                      }
+                    }}
+                  >
+                    ⋮⋮
+                  </button>
                   <span className="hidden h-10 w-[2px] shrink-0 rounded-full sm:block" style={{ background: tone }} />
                   <button type="button" onClick={() => onEdit(i, e)} className="min-w-0 flex-1 text-left">
                     <span className="flex flex-wrap items-center gap-2">
@@ -254,7 +335,7 @@ function SideList({
                       {live && !live.available ? <Badge tone="danger">cooldown</Badge> : null}
                     </span>
                     <span className="mono mt-1 block truncate text-2xs text-[var(--ink-faint)]">
-                      [{e.kind}] weight={e.weight} · {e.provider} · {e.model || "—"}
+                      [{e.kind}] {e.provider} · {e.model || "—"}
                     </span>
                     <span className="mono block truncate text-2xs text-[var(--ink-faint)]">{e.url || "—"}</span>
                   </button>

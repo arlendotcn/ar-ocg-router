@@ -1403,7 +1403,6 @@ fn admin_api_save_round_trips_without_destroying_keys() {
     });
     let mut doc = request(r.port, "GET", "/api/config", None, &[]).json();
     doc["router"]["surplus_max_pct"] = serde_json::json!(77);
-    doc["router"]["selection"] = serde_json::json!("round_robin");
     let resp = request(r.port, "PUT", "/api/config", Some(&doc.to_string()), &[]);
     if resp.status != 200 {
         dump_log(&r);
@@ -1413,11 +1412,11 @@ fn admin_api_save_round_trips_without_destroying_keys() {
     assert_eq!(saved["saved"], true);
     assert_eq!(saved["reloaded"], true);
 
-    // the change is live (surplus_max_pct is reported by stats; selection only by the config API)
+    // the change is live
     let stats = request(r.port, "GET", "/router/stats", None, &[]).json();
     assert_eq!(stats["router"]["surplus_max_pct"].as_f64().unwrap(), 77.0);
     let live = request(r.port, "GET", "/api/config", None, &[]).json();
-    assert_eq!(live["router"]["selection"].as_str(), Some("round_robin"));
+    assert_eq!(live["router"]["surplus_max_pct"].as_f64().unwrap(), 77.0);
 
     // and the keys still work: a proxied request still reaches the upstream
     let resp = request(r.port, "POST", "/v1/chat/completions", Some(CHAT_BODY), &[]);
@@ -1908,8 +1907,59 @@ fn console_round_trip_is_identity() {
             .iter()
             .find(|x| x["name"].as_str() == Some(name))
             .unwrap_or_else(|| panic!("endpoint {} disappeared", name));
-        assert_eq!(e, same, "endpoint {} changed", name);
+        // order is the one field a save is allowed to change: it is derived from the row
+        // position inside its section, so it is asserted separately in its own test.
+        let (mut e_wo, mut s_wo) = (e.clone(), same.clone());
+        e_wo.as_object_mut().unwrap().remove("order");
+        s_wo.as_object_mut().unwrap().remove("order");
+        assert_eq!(e_wo, s_wo, "endpoint {} changed", name);
     }
+}
+
+/// order is not user data any more: it is renumbered 10, 20, 30 ... by position inside each
+/// section, so the sequence the console arranged is what the router reads back. A client that
+/// sends a stale or absent order must not be able to desync it.
+#[test]
+fn order_is_derived_from_position_on_every_save() {
+    let go = Mock::start();
+    let fb = Mock::start();
+    let r = start_router("order-derived", "2026-09-16T02:00:00Z", &|port| {
+        config_peak_offpeak(port, &format!("{}/v1", go.url()), &fb.url(), "surplus_first", 80)
+    });
+    let mut doc = request(r.port, "GET", "/api/config", None, &[]).json();
+    assert_eq!(doc["endpoints"].as_array().unwrap().len(), 2);
+
+    // Reverse the array and claim a bogus order on every row: the saved order must follow the
+    // array positions, not whatever the client sent.
+    let eps = doc["endpoints"].as_array_mut().unwrap();
+    eps.reverse();
+    for e in eps.iter_mut() {
+        e["order"] = serde_json::json!(999);
+    }
+    let resp = request(r.port, "PUT", "/api/config", Some(&doc.to_string()), &[]);
+    if resp.status != 200 {
+        dump_log(&r);
+    }
+    assert_eq!(resp.status, 200, "save failed: {}", resp.body);
+
+    let after = request(r.port, "GET", "/api/config", None, &[]).json();
+    let mut plans: Vec<(String, i64)> = Vec::new();
+    let mut cash: Vec<(String, i64)> = Vec::new();
+    for e in after["endpoints"].as_array().unwrap() {
+        let row = (
+            e["name"].as_str().unwrap().to_string(),
+            e["order"].as_i64().unwrap(),
+        );
+        if e["kind"].as_str() == Some("fallback") {
+            cash.push(row);
+        } else {
+            plans.push(row);
+        }
+    }
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].1, 10, "the first plan is order 10");
+    assert_eq!(cash.len(), 1);
+    assert_eq!(cash[0].1, 10, "each section numbers itself from 10");
 }
 
 /// Non-default policy and per-endpoint settings must survive a console save. Each field here was

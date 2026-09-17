@@ -31,7 +31,6 @@ plans:
     model: deepseek-flash
     mode: both
     order: 10
-    weight: 60
     inject_session: true
     quota: { unit: usd, rolling: 12, weekly: 30, monthly: 60, probe: usage }
 
@@ -43,7 +42,6 @@ fallback:
     model: deepseek-flash
     mode: both
     order: 10
-    weight: 50
     rule: [offpeak, quota_low]
     quota: { probe: balance }
 ```
@@ -58,8 +56,7 @@ fallback:
 | `key` | Literal, `env:VAR`, or `file:/path/key.txt`. |
 | `model` | **Required.** The only model id this endpoint ever sends, verbatim. A wrong id fails upstream and the router moves on. |
 | `mode` | `openai-completion` / `openai-responses` / `anthropic-messages` / `both` / `any`, or a list. |
-| `order` | Consumption order inside its list; smaller goes first. Defaults to position. |
-| `weight` | 0-99, weighted share **inside the same `order`**. Not a priority. `0` means "only when nothing else works". |
+| `order` | Consumption order inside its list; smaller goes first. Derived from the position of the entry, and rewritten that way on every save — arrange it in the console instead of editing it here. |
 | `rule` | `fallback` only: conditions under which it may be *preferred*. See below. |
 | `inject_session` | Send `x-opencode-session`. Required by OpenCode Go. |
 | `headers` | Extra request headers (some bridges require a client fingerprint). |
@@ -95,7 +92,6 @@ token counts divided by the plan limit). That only affects the precision of the 
 | `surplus_max_pct` | 80 | Any window at or above this percentage counts as tight. |
 | `surplus_projection` | true | Extrapolate linearly along the window; a plan that will not be used up still counts as surplus. |
 | `exhaust_at_pct` | 99 | At this percentage the plan stops being preferred. |
-| `selection` | `weighted` | Within one `order`: `weighted`, `round_robin`, `lowest_quota`. |
 | `session_affinity` | true | Keep one conversation on one endpoint to preserve upstream session and cache semantics. |
 | `session_affinity_ttl_secs` | 1800 | Binding expiry. |
 | `session_fallback` | `process` | Session id when the client sends none: `process` (steady caching) or `per-request`. |
