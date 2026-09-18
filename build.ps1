@@ -163,6 +163,13 @@ if (-not (Test-Path $exe)) { throw "binary not found: $exe" }
 
 if (-not $OutDir) { $OutDir = Join-Path $root "dist\windows-x64" }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+# The output directory doubles as a place to run the built binary from, so it accumulates a real
+# config.yaml, a state file and a log. Those must never end up in a release archive: this script
+# only copies files in, so anything else has to be removed here.
+foreach ($stale in @("config.yaml", "ar-ocg-router.state.json", "ar-ocg-router.log", "ar-ocg-router.exe.tmp")) {
+  $p = Join-Path $OutDir $stale
+  if (Test-Path $p) { Remove-Item $p -Force; Write-Host "removed stale $stale from the output directory" }
+}
 Copy-Item $exe (Join-Path $OutDir "ar-ocg-router.exe") -Force
 Copy-Item (Join-Path $root "config.example.yaml") $OutDir -Force
 # the model library ships as a starting point; the router also has it built in
