@@ -939,6 +939,10 @@ fn plan_preview(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
         200,
         &json!({
             "now": crate::timeutil::iso8601(now),
+            // Which config produced this answer. Always the running one: the console edits a draft
+            // that only reaches the router after a save, so the UI has to be able to say so
+            // instead of showing a plan that silently disagrees with what is on screen.
+            "source": "live",
             "peak": plan.is_peak,
             "preferred": plan.preferred.as_str(),
             "reason": plan.reason,

@@ -2261,3 +2261,97 @@ fn statistics_survive_a_restart_until_they_are_reset() {
         fresh
     );
 }
+
+/// The three client entry points are not cosmetic: "modes" decides which endpoints may serve
+/// each one, and the console has to be able to ask about all three. The anthropic path in
+/// particular is the one that silently has no candidates when nobody declares that mode.
+#[test]
+fn plan_preview_is_per_protocol_and_answers_for_the_saved_config() {
+    let chat_only = Mock::start();
+    let responses_only = Mock::start();
+    let r = start_router("preview-protocols", "2026-09-16T02:00:00Z", &|port| {
+        format!(
+            r#"server:
+  host: 127.0.0.1
+  port: {port}
+  max_connections: 16
+log:
+  level: debug
+  file: ""
+router:
+  mode: plans
+  peak_windows: "Mon-Fri 01:00-04:00, 06:00-10:00 UTC"
+  idle_prefer: surplus_first
+plans:
+  - name: chat-only
+    url: {a}/v1
+    key: k1
+    model: model-a
+    mode: openai-completion
+    provider: opencodego
+  - name: responses-only
+    url: {b}/v1
+    key: k2
+    model: model-b
+    mode: [openai-responses]
+    provider: opencodego
+"#,
+            port = port,
+            a = chat_only.url(),
+            b = responses_only.url()
+        )
+    });
+
+    let preview = |endpoint: &str| -> serde_json::Value {
+        let resp = request(
+            r.port,
+            "POST",
+            "/api/plan/preview",
+            Some(&format!("{{\"endpoint\":\"{}\"}}", endpoint)),
+            &[],
+        );
+        if resp.status != 200 {
+            dump_log(&r);
+        }
+        assert_eq!(resp.status, 200, "preview failed: {}", resp.body);
+        resp.json()
+    };
+    let names = |v: &serde_json::Value| -> Vec<String> {
+        v["candidates"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|c| c["name"].as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default()
+    };
+
+    let chat = preview("chat");
+    assert_eq!(names(&chat), vec!["chat-only".to_string()], "chat preview: {}", chat);
+    assert_eq!(chat["source"].as_str(), Some("live"));
+
+    let responses = preview("responses");
+    assert_eq!(
+        names(&responses),
+        vec!["responses-only".to_string()],
+        "responses preview: {}",
+        responses
+    );
+
+    // Nobody declares anthropic-messages here, so the honest answer is "no candidate" - which is
+    // exactly what a real POST /v1/messages would hit.
+    let anthropic = preview("anthropic");
+    assert!(names(&anthropic).is_empty(), "anthropic preview: {}", anthropic);
+    let skipped = anthropic["skipped"].as_array().expect("skipped list");
+    assert_eq!(skipped.len(), 2, "both endpoints must say why: {}", anthropic);
+    assert!(
+        skipped.iter().all(|s| s["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("anthropic-messages")),
+        "skipped reasons: {}",
+        anthropic
+    );
+
+    // A real request on that path fails the same way, so the preview is not lying.
+    let live = request(r.port, "POST", "/v1/messages", Some(CHAT_BODY), &[]);
+    assert_eq!(live.status, 503, "body={}", live.body);
+    assert!(live.body.contains("no anthropic-messages support"), "body={}", live.body);
+}

@@ -198,6 +198,8 @@ export type ConfigDoc = {
 
 export type PlanPreview = {
   now: string;
+  /** Always "live": the preview reflects the *running* config, not an unsaved draft. */
+  source: string;
   peak: boolean;
   candidates: { name: string; kind: string; model: string; url: string }[];
   skipped: { name: string; reason: string }[];

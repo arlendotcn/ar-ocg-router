@@ -13,14 +13,22 @@ import { ChipInput, Field, Input, Select, Switch } from "@/components/ui/field";
 import type { PlanPreview, RouterCfg } from "@/types/api";
 import { fmtDuration } from "@/lib/format";
 import { useStatsStream } from "@/lib/use-stats";
+import { cn } from "@/lib/utils";
+
+/** The three client entry points the router distinguishes when picking endpoints. */
+type Protocol = "chat" | "responses" | "anthropic";
 
 export function PolicyPage() {
   const { t, lang } = useI18n();
   const toast = useToast();
   const cfg = useConfig();
   const { stats } = useStatsStream();
+  // The three protocols are separate entry points with separate eligible-endpoint sets: an
+  // endpoint only takes part when its "modes" covers the protocol the client asked for. So the
+  // preview has to be asked per protocol, and "no candidate" is a real answer, not an error.
   const [preview, setPreview] = React.useState<PlanPreview | null>(null);
-  const [previewKind, setPreviewKind] = React.useState<"chat" | "responses">("chat");
+  const [previewKind, setPreviewKind] = React.useState<Protocol>("chat");
+  const [previewLoading, setPreviewLoading] = React.useState(false);
 
   const d = cfg.draft;
 
@@ -31,14 +39,27 @@ export function PolicyPage() {
     [cfg],
   );
 
-  const runPreview = async (kind: "chat" | "responses") => {
-    setPreviewKind(kind);
-    try {
-      setPreview(await api.planPreview(kind));
-    } catch (e) {
-      toast.push("err", e instanceof Error ? e.message : String(e));
-    }
-  };
+  const runPreview = React.useCallback(
+    async (kind: Protocol) => {
+      setPreviewKind(kind);
+      setPreviewLoading(true);
+      try {
+        setPreview(await api.planPreview(kind));
+      } catch (e) {
+        toast.push("err", e instanceof Error ? e.message : String(e));
+      } finally {
+        setPreviewLoading(false);
+      }
+    },
+    [toast],
+  );
+
+  // Run once so the panel shows the current answer instead of an empty placeholder - this is the
+  // first thing anyone opening the policy page wants to check.
+  React.useEffect(() => {
+    void runPreview("chat");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   if (cfg.loading || !d) return <Plate className="h-40 animate-pulse" />;
   const r = d.router;
@@ -73,7 +94,7 @@ export function PolicyPage() {
               size="sm"
               variant={previewKind === "chat" ? "selected" : "outline"}
               aria-pressed={previewKind === "chat"}
-              onClick={() => runPreview("chat")}
+              onClick={() => void runPreview("chat")}
             >
               {t.policy.previewChat}
             </Button>
@@ -81,15 +102,30 @@ export function PolicyPage() {
               size="sm"
               variant={previewKind === "responses" ? "selected" : "outline"}
               aria-pressed={previewKind === "responses"}
-              onClick={() => runPreview("responses")}
+              onClick={() => void runPreview("responses")}
             >
               {t.policy.previewResponses}
+            </Button>
+            <Button
+              size="sm"
+              variant={previewKind === "anthropic" ? "selected" : "outline"}
+              aria-pressed={previewKind === "anthropic"}
+              onClick={() => void runPreview("anthropic")}
+            >
+              {t.policy.previewAnthropic}
             </Button>
           </>
         }
       >
+        {cfg.dirty ? (
+          // Without this the panel is actively misleading: it answers for the running router
+          // while the page in front of the user shows edited values.
+          <div className="border-b border-[var(--line)] bg-[var(--warn)]/10 px-3 py-2 text-xs leading-relaxed text-[var(--warn)] sm:px-4">
+            {t.policy.previewStale}
+          </div>
+        ) : null}
         {preview ? (
-          <div className="px-3 py-3 sm:px-4">
+          <div className={cn("px-3 py-3 sm:px-4", previewLoading && "opacity-60")}>
             <div className="flex flex-wrap items-center gap-2">
               <Badge tone={preview.peak ? "signal" : "plain"} dot>
                 {preview.peak ? t.dash.peak : t.dash.offpeak}
@@ -123,9 +159,20 @@ export function PolicyPage() {
                 ))
               )}
             </div>
-            <p className="mono mt-2 text-2xs text-[var(--ink-faint)]">
-              {t.policy.previewReason}: {preview.reason}
-            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+              <p className="mono text-2xs text-[var(--ink-faint)]">
+                {t.policy.previewReason}: {preview.reason}
+              </p>
+              {/* The preview only re-runs when asked: after saving, this is how you see the new
+                  answer without walking back to the button row. */}
+              <button
+                type="button"
+                onClick={() => void runPreview(previewKind)}
+                className="mono text-2xs uppercase tracking-[0.12em] text-[var(--ink-faint)] underline transition-colors hover:text-[var(--ink)]"
+              >
+                {previewLoading ? t.policy.previewLoading : t.policy.previewRun}
+              </button>
+            </div>
             {preview.skipped.length ? (
               <p className="mono mt-1 text-2xs text-[var(--ink-faint)]">
                 {t.policy.stoppedAt}: {preview.skipped.map((s) => `${s.name}(${s.reason})`).join(", ")}
