@@ -20,7 +20,8 @@ import { cn } from "@/lib/utils";
 export function DashboardPage() {
   const { t, lang } = useI18n();
   const toast = useToast();
-  const { stats, error, loading, paused, setPaused, refresh, updatedAt, background } = useStatsStream();
+  // The dashboard is the one page someone watches live: 2s.
+  const { stats, error, loading, paused, setPaused, refresh, updatedAt, background } = useStatsStream({ intervalMs: 2000 });
   const [tick, setTick] = React.useState(0);
   // Which endpoint is being toggled right now, so the button cannot be double-fired.
   const [busy, setBusy] = React.useState<string | null>(null);

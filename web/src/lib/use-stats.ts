@@ -31,7 +31,29 @@ let inFlight = false;
 /// being dropped, otherwise a manual refresh (or the one after a config change) can vanish.
 let rerun = false;
 let background = false;
+/// Validator of the snapshot we hold, echoed back so the server can answer 304.
+let etag: string | null = null;
 const listeners = new Set<() => void>();
+
+/**
+ * How often the shared poller runs.
+ *
+ * This single poller feeds every widget on the page, but the widgets do not need the same freshness:
+ * the dashboard is watched live, while the top bar only wants "is it peak yet?". So each widget
+ * declares what it needs and the poller runs at the fastest request currently mounted - it can only
+ * ever get faster than the default, never slower, so a page cannot starve a faster one.
+ */
+const DEFAULT_INTERVAL_MS = 5000;
+const wanted = new Set<number>();
+let intervalMs = DEFAULT_INTERVAL_MS;
+
+function recomputeInterval() {
+  let next = DEFAULT_INTERVAL_MS;
+  for (const v of wanted) next = Math.min(next, v);
+  if (next === intervalMs) return;
+  intervalMs = next;
+  reschedule();
+}
 
 function emit() {
   listeners.forEach((l) => l());
@@ -55,8 +77,14 @@ async function tick(force = false): Promise<void> {
   }
   inFlight = true;
   try {
-    current = await api.stats();
+    const res = await api.stats(etag);
+    if (res.changed) {
+      current = res.stats;
+      etag = res.etag;
+    }
     currentError = null;
+    // Even a 304 counts as "the page just talked to the router": the countdown on the dashboard
+    // measures drift from this timestamp, so freezing it would make the clock walk away.
     updatedAt = Date.now();
     if (background) {
       background = false;
@@ -74,11 +102,22 @@ async function tick(force = false): Promise<void> {
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;
+
+/// Restart the timer at the current interval, keeping the accumulated phase out of it: a changed
+/// interval means "from now on", and one stray early tick is not worth the bookkeeping.
+function reschedule() {
+  if (!timer) return;
+  clearInterval(timer);
+  timer = setInterval(() => {
+    if (!paused) void tick();
+  }, intervalMs);
+}
+
 function ensureTimer() {
   if (timer) return;
   timer = setInterval(() => {
     if (!paused) void tick();
-  }, 2000);
+  }, intervalMs);
   void tick(true);
   if (typeof document !== "undefined") {
     document.addEventListener("visibilitychange", () => {
@@ -89,8 +128,22 @@ function ensureTimer() {
   }
 }
 
-export function useStatsStream(opts?: { enabled?: boolean }): Snapshot {
+/**
+ * Register one subscriber's freshness requirement. Returns the release function for that
+ * subscriber's effect cleanup.
+ */
+export function requestStatsInterval(ms: number): () => void {
+  wanted.add(ms);
+  recomputeInterval();
+  return () => {
+    wanted.delete(ms);
+    recomputeInterval();
+  };
+}
+
+export function useStatsStream(opts?: { enabled?: boolean; intervalMs?: number }): Snapshot {
   const enabled = opts?.enabled ?? true;
+  const interval = opts?.intervalMs;
   const [, force] = React.useReducer((n) => n + 1, 0);
   const [pausedState, setPausedState] = React.useState(paused);
 
@@ -103,6 +156,12 @@ export function useStatsStream(opts?: { enabled?: boolean }): Snapshot {
       listeners.delete(cb);
     };
   }, [enabled]);
+
+  // A page states how fresh it needs this to be; the fastest one currently mounted wins.
+  React.useEffect(() => {
+    if (!enabled) return;
+    return requestStatsInterval(interval ?? DEFAULT_INTERVAL_MS);
+  }, [enabled, interval]);
 
   const setPausedFn = React.useCallback((v: boolean) => {
     paused = v;

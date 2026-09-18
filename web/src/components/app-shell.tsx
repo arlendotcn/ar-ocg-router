@@ -99,7 +99,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
 function TopBar({ theme, setTheme }: { theme: Theme; setTheme: (t: Theme) => void }) {
   const { t, lang, setLang } = useI18nSafe();
-  const { stats } = useStatsStream();
+  // The badge is on every page, but it only needs to know whether it is peak yet: it states the
+  // default freshness rather than riding on whatever the page happens to ask for.
+  const { stats } = useStatsStream({ intervalMs: 5000 });
   const peak = stats?.router.peak;
   return (
     <header className="relative z-40 shrink-0 border-b border-[var(--line)] bg-[var(--bg)]">

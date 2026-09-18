@@ -2355,3 +2355,59 @@ plans:
     assert_eq!(live.status, 503, "body={}", live.body);
     assert!(live.body.contains("no anthropic-messages support"), "body={}", live.body);
 }
+
+/// The console polls /router/stats every couple of seconds; the answer is usually unchanged, so it
+/// answers 304 instead of resending the body - but only when nothing the console draws has moved.
+#[test]
+fn stats_supports_conditional_get_and_still_reports_every_change() {
+    let go = Mock::start();
+    go.set_quota_pct(12.0);
+    let r = start_router("conditional-get", "2026-09-16T02:00:00Z", &|port| {
+        config_plans_only(port, &go.url())
+    });
+
+    // First answer: a body and its validator.
+    let first = request(r.port, "GET", "/router/stats", None, &[]);
+    assert_eq!(first.status, 200, "body={}", first.body);
+    let etag = first.header("etag").expect("ETag header").to_string();
+    assert!(etag.starts_with("W/\""), "unexpected validator: {}", etag);
+    assert!(
+        first.header("cache-control").unwrap_or("").contains("no-cache"),
+        "a conditional response must not be cached blindly"
+    );
+    // The body carries fields that move on their own; they must not reach the validator.
+    assert!(first.body.contains("uptime_secs"), "sanity: the body has a volatile field");
+
+    // Polling with that validator, with nothing happening in between, must not resend 8 KB.
+    let second = request(r.port, "GET", "/router/stats", None, &[("If-None-Match", &etag)]);
+    assert_eq!(second.status, 304, "body={}", second.body);
+    assert!(second.body.is_empty(), "a 304 must not carry a body: {:?}", second.body);
+    assert_eq!(
+        second.header("etag"),
+        Some(etag.as_str()),
+        "a 304 repeats the validator it matched"
+    );
+
+    // Serving a request moves a counter, so the next poll must get fresh data, not a 304.
+    assert_eq!(
+        request(r.port, "POST", "/v1/chat/completions", Some(CHAT_BODY), &[]).status,
+        200
+    );
+    let moved = request(r.port, "GET", "/router/stats", None, &[("If-None-Match", &etag)]);
+    assert_eq!(moved.status, 200, "a change must not be hidden by the validator");
+    let etag2 = moved.header("etag").expect("ETag header").to_string();
+    assert_ne!(etag2, etag, "the validator must move with the statistics");
+    assert_eq!(moved.json()["accounts"][0]["stats"]["requests"].as_u64(), Some(1));
+
+    // And the new validator is honoured in turn.
+    assert_eq!(
+        request(r.port, "GET", "/router/stats", None, &[("If-None-Match", &etag2)]).status,
+        304
+    );
+
+    // A bogus validator never gets a 304.
+    assert_eq!(
+        request(r.port, "GET", "/router/stats", None, &[("If-None-Match", "W/\"nonsense\"")]).status,
+        200
+    );
+}

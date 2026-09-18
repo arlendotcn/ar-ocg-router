@@ -19,7 +19,8 @@ export function SettingsPage() {
   const { t, lang } = useI18n();
   const toast = useToast();
   const cfg = useConfig();
-  const { stats, refresh } = useStatsStream();
+  // peak_windows and the managed flag: two fields that change when you save, not while you watch.
+  const { stats, refresh } = useStatsStream({ intervalMs: 30000 });
   const [backups, setBackups] = React.useState<BackupEntry[]>([]);
   const [rawOpen, setRawOpen] = React.useState(false);
   const [rawText, setRawText] = React.useState("");

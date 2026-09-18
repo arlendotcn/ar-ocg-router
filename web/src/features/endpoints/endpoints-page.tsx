@@ -38,7 +38,8 @@ export function EndpointsPage() {
   const { t } = useI18n();
   const toast = useToast();
   const cfg = useConfig();
-  const { stats } = useStatsStream();
+  // Per-endpoint request/usage figures, read while editing a row: 5s is fresh enough.
+  const { stats } = useStatsStream({ intervalMs: 5000 });
   const [editing, setEditing] = React.useState<{ index: number; endpoint: EndpointCfg } | null>(null);
   // Reference specs from the model library, so the editor can annotate a chosen model id.
   const [library, setLibrary] = React.useState<ModelEntry[]>([]);

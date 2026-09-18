@@ -174,8 +174,26 @@ pub fn handle(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
             json_response(req, out, 200, &json!({"status": "ok", "version": VERSION}));
         }
         ("GET", "/router/stats") | ("GET", "/stats") => {
+            // Conditional GET: the console polls this every couple of seconds and the answer is
+            // usually unchanged, so tell it so instead of shipping 8 KB again. The validator is a
+            // hash of this very body minus the fields that move on their own (the clock, the
+            // uptime), so a 304 can never hide a change the console would have drawn.
             let body = stats_json(state);
-            json_response(req, out, 200, &body);
+            // "requests" is excluded because it counts the polls themselves; the fields that
+            // describe real traffic (proxied, streams, retries, bytes) are what make it move.
+            let revision = crate::etag::stats_revision(&body, &["now", "uptime_secs", "requests"]);
+            if crate::etag::matches(req.header("if-none-match"), &revision) {
+                let _ = out.send_head(304, &[("ETag".to_string(), revision)], Some(0), req.keep_alive, &req.version);
+                let _ = out.finish();
+            } else {
+                let _ = out.send_json_with(
+                    200,
+                    &body,
+                    &[("ETag".to_string(), revision), ("Cache-Control".to_string(), "no-cache".to_string())],
+                    req.keep_alive,
+                    &req.version,
+                );
+            }
         }
         ("GET", "/router/schedule") => {
             let body = schedule_json(&cfg, util::now_secs());

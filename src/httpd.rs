@@ -94,6 +94,7 @@ pub const fn reason_phrase(status: u16) -> &'static str {
         200 => "OK",
         201 => "Created",
         204 => "No Content",
+        304 => "Not Modified",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
@@ -442,6 +443,23 @@ impl Responder {
         self.finish()
     }
 
+    /// Like send_json, plus extra headers. Used where a response carries a validator (ETag).
+    pub fn send_json_with(
+        &mut self,
+        status: u16,
+        value: &serde_json::Value,
+        extra: &[(String, String)],
+        keep_alive: bool,
+        version: &str,
+    ) -> io::Result<()> {
+        let body = serde_json::to_vec(value).unwrap_or_else(|_| b"{}".to_vec());
+        let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
+        headers.extend_from_slice(extra);
+        self.send_head(status, &headers, Some(body.len()), keep_alive, version)?;
+        self.send_body(&body)?;
+        self.finish()
+    }
+
     pub fn send_text(&mut self, status: u16, text: &str, content_type: &str, keep_alive: bool, version: &str) -> io::Result<()> {
         self.send_head(
             status,
@@ -470,11 +488,12 @@ pub struct Statics {
     pub retries: std::sync::atomic::AtomicU64,
 }
 
-/// A frozen read of Statics, used by the state file and by "reset statistics".
+/// A frozen read of Statics, used by the state file, by "reset statistics" and as the basis of the
+/// /router/stats validator.
 ///
-/// What gets written is the difference against the baseline of the last write, so a counter can be
-/// checkpointed every 5 seconds without counting the same request twice, and a restart continues
-/// from the value in the file instead of from zero.
+/// The values are running totals, not per-interval deltas: a total can be checkpointed as often as
+/// we like without the reader having to know when the last write happened, so a restart can neither
+/// double-count nor lose a request.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct StaticsSnapshot {
     pub requests: u64,

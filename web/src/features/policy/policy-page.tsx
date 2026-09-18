@@ -22,7 +22,8 @@ export function PolicyPage() {
   const { t, lang } = useI18n();
   const toast = useToast();
   const cfg = useConfig();
-  const { stats } = useStatsStream();
+  // Only the peak/idle clock and the countdown, neither of which changes quickly: 10s.
+  const { stats } = useStatsStream({ intervalMs: 10000 });
   // The three protocols are separate entry points with separate eligible-endpoint sets: an
   // endpoint only takes part when its "modes" covers the protocol the client asked for. So the
   // preview has to be asked per protocol, and "no candidate" is a real answer, not an error.

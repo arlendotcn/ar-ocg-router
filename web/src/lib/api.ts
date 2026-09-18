@@ -13,6 +13,30 @@ export class ApiError extends Error {
   }
 }
 
+type RawResult = { status: number; json: unknown; text: string; etag: string | null };
+
+/** One fetch, with the response headers the conditional-GET path needs. */
+async function callRaw(path: string, etag?: string | null): Promise<RawResult> {
+  const res = await fetch(BASE + path, {
+    method: "GET",
+    headers: etag ? { "If-None-Match": etag } : undefined,
+    // The router answers this one conditionally; letting the browser cache it too would disable
+    // revalidation and hand back a stale body instead.
+    cache: "no-store",
+  });
+  if (res.status !== 304 && !res.ok) {
+    throw new ApiError(res.status, res.statusText || `HTTP ${res.status}`);
+  }
+  const text = await res.text();
+  let parsed: unknown = null;
+  try {
+    parsed = text ? JSON.parse(text) : null;
+  } catch {
+    parsed = null;
+  }
+  return { status: res.status, json: parsed, text, etag: res.headers.get("ETag") };
+}
+
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(BASE + path, {
     method,
@@ -38,8 +62,21 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   return parsed as T;
 }
 
+export type StatsResult =
+  | { changed: true; stats: Stats; etag: string | null }
+  | { changed: false };
+
 export const api = {
-  stats: () => call<Stats>("GET", "/router/stats"),
+  /**
+   * Conditional GET: send the validator of the snapshot we already hold and the router answers 304
+   * when nothing moved, which is the common case for a 2-second poll. "changed: false" means the
+   * caller should keep showing what it has.
+   */
+  stats: async (etag?: string | null): Promise<StatsResult> => {
+    const res = await callRaw("/router/stats", etag);
+    if (res.status === 304) return { changed: false };
+    return { changed: true, stats: (res.json ?? {}) as Stats, etag: res.etag };
+  },
   config: () => call<ConfigDoc>("GET", "/api/config"),
   rawConfig: () => call<{ path: string; text: string }>("GET", "/api/config/raw"),
 

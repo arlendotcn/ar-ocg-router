@@ -9,6 +9,7 @@ mod api;
 mod config;
 mod configbackup;
 mod configwrite;
+mod etag;
 mod httpclient;
 mod httpd;
 mod library;
