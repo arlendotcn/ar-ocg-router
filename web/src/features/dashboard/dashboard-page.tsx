@@ -500,7 +500,17 @@ function AccountRow({
 
   return (
     <div className="rise" style={{ animationDelay: `${Math.min(index * 28, 240)}ms` }}>
-      <div className={cn("flex items-center", !enabled && "opacity-60", dragging && "bg-[var(--panel-2)]")}>
+      {/* The highlight belongs to the whole row, not to the middle of it. It used to be painted by
+          the name button alone, which left a 4px notch beside the drag handle and a 12px one before
+          the enable switch - the row looked like three separate hit boxes stacked end to end. The
+          button still owns the click; it no longer owns the background. */}
+      <div
+        className={cn(
+          "group/row flex items-center transition-colors",
+          !enabled && "opacity-60",
+          dragging ? "bg-[var(--panel-2)]" : "hover:bg-[var(--panel-2)]",
+        )}
+      >
         {/* Drag handle: pointer-draggable on touch and mouse, and arrow keys on the keyboard. */}
         <button
           type="button"
@@ -526,7 +536,7 @@ function AccountRow({
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
-          className="flex min-w-0 flex-1 items-center gap-3 px-1 py-2.5 text-left transition-colors hover:bg-[var(--panel-2)] sm:px-2"
+          className="flex min-w-0 flex-1 items-center gap-3 px-1 py-2.5 text-left sm:px-2"
           aria-expanded={open}
         >
           <span className="h-8 w-[2px] shrink-0 rounded-full" style={{ background: tone }} />

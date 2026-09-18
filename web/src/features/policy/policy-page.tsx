@@ -89,7 +89,9 @@ export function PolicyPage() {
         title={t.policy.preview}
         hint={t.policy.previewHint}
         actions={
-          <>
+          // A labelled group, not three loose buttons: they are one choice, and a screen reader
+          // has to be able to say what the choice is about.
+          <div role="group" aria-label={t.policy.previewProtocol} className="flex flex-wrap items-center gap-2">
             <Button
               size="sm"
               variant={previewKind === "chat" ? "selected" : "outline"}
@@ -114,7 +116,7 @@ export function PolicyPage() {
             >
               {t.policy.previewAnthropic}
             </Button>
-          </>
+          </div>
         }
       >
         {cfg.dirty ? (
