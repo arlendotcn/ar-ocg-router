@@ -92,6 +92,9 @@ export const api = {
       backup,
     }),
   reload: () => call<{ status: string; summary: string }>("POST", "/router/reload", {}),
+  /** Zero the statistics and the endpoint health memory. The quota ledger is kept. */
+  resetStats: () =>
+    call<{ reset: boolean; note: string }>("POST", "/api/stats/reset", {}),
 };
 
 export type BackupEntry = {

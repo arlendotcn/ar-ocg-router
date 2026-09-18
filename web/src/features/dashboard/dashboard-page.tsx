@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Meter } from "@/components/ui/meter";
 import { Plate, PlateBlock, Readout } from "@/components/ui/plate";
 import { PageHeader } from "@/components/page-header";
+
 import { fmtBytes, fmtAgo, fmtDuration, fmtNum, fmtPct, fmtUsd, fmtWhen } from "@/lib/format";
 import type { Account } from "@/types/api";
 import { cn } from "@/lib/utils";
@@ -23,6 +24,11 @@ export function DashboardPage() {
   const [tick, setTick] = React.useState(0);
   // Which endpoint is being toggled right now, so the button cannot be double-fired.
   const [busy, setBusy] = React.useState<string | null>(null);
+  // Reset is destructive and irreversible, so it confirms in place (same idea as deleting an
+  // endpoint): the first click arms it, the second one runs it. A floating panel would have to
+  // hang over the plates below on a phone, and window.confirm would take the decision off screen.
+  const [resetArmed, setResetArmed] = React.useState(false);
+  const [resetting, setResetting] = React.useState(false);
 
   const setEndpointEnabled = async (name: string, enabled: boolean) => {
     setBusy(name);
@@ -34,6 +40,22 @@ export function DashboardPage() {
       toast.push("err", e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
+    }
+  };
+
+  /// Zero the counters server-side, then pull the fresh snapshot instead of waiting for the next
+  /// poll, so the page cannot keep showing numbers that no longer exist.
+  const resetStats = async () => {
+    setResetting(true);
+    try {
+      await api.resetStats();
+      refresh();
+      toast.push("ok", t.dash.resetStatsDone);
+    } catch (e) {
+      toast.push("err", e instanceof Error ? e.message : String(e));
+    } finally {
+      setResetArmed(false);
+      setResetting(false);
     }
   };
 
@@ -116,6 +138,37 @@ export function DashboardPage() {
         }
         actions={
           <>
+            {/* Reset sits next to the switch but is not another way to refresh: it destroys data.
+                Armed state carries the warning colour so it cannot be mistaken for the normal button. */}
+            {resetArmed ? (
+              <span className="flex items-center gap-1.5">
+                <span className="max-w-[13rem] text-2xs leading-snug text-[var(--warn)] sm:max-w-none">
+                  {t.dash.resetStatsTitle}
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={resetting}
+                  onClick={() => void resetStats()}
+                  className="border-[var(--warn)] text-[var(--warn)] hover:bg-[var(--warn)]/15"
+                >
+                  {t.common.confirm}
+                </Button>
+                <Button size="sm" variant="ghost" disabled={resetting} onClick={() => setResetArmed(false)}>
+                  {t.common.cancel}
+                </Button>
+              </span>
+            ) : (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setResetArmed(true)}
+                title={t.dash.resetStatsHint}
+                aria-label={t.dash.resetStatsHint}
+              >
+                {t.dash.resetStats}
+              </Button>
+            )}
             <label className="mono flex cursor-pointer items-center gap-2 text-2xs uppercase tracking-[0.12em] text-[var(--ink-faint)]">
               {t.dash.autoRefresh}
               {/* checked means "the page keeps refreshing itself"; the manual button below only
@@ -179,6 +232,7 @@ export function DashboardPage() {
             label={t.dash.requests}
             value={fmtNum(c.requests)}
             sub={`${t.dash.proxied} ${fmtNum(c.proxied)} · ${t.dash.errors} ${fmtNum(c.errors)}`}
+            help={t.dash.lifetimeHint}
           />
         </Plate>
         <Plate className="rise">

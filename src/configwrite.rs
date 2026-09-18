@@ -521,7 +521,6 @@ plans:
     model: plan-one-model
     mode: openai-completion
     order: 1
-    weight: 90
     quota:
       unit: usd
       rolling: 3
@@ -535,7 +534,6 @@ plans:
     model: plan-two-model
     mode: anthropic-messages
     order: 0
-    weight: 10
     inject_session: true
     headers:
       x-plan-two: "yes"
@@ -553,7 +551,6 @@ fallback:
     model: deepseek-chat
     mode: both
     order: 3
-    weight: 25
     rule:
       - peak
       - quota_low

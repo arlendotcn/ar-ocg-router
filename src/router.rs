@@ -191,6 +191,15 @@ impl HealthMap {
             *m = data;
         }
     }
+
+    /// Forget every remembered failure and skip window ("reset statistics" in the console).
+    pub fn clear(&self) {
+        let mut m = match self.map.lock() {
+            Ok(m) => m,
+            Err(p) => p.into_inner(),
+        };
+        m.clear();
+    }
 }
 
 /// conversation -> endpoint affinity (endpoint-level; keeps upstream session/cache semantics).

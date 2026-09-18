@@ -300,12 +300,14 @@ fn main() {
     {
         let cfg = state.cfg();
         let path = persist::state_path(&cfg.path);
-        state.router.health.restore(persist::load(&path));
+        let saved = persist::load(&path);
+        // Counters shown by the console cover the lifetime of the install, not of this process:
+        // a restart continues from the file instead of dropping back to zero.
+        persist::restore_counters(&state, saved.counters.unwrap_or_default());
+        state.router.health.restore(saved.health);
+        state.registry.restore_stats(&saved.stats);
         // write once at startup so the file exists (and is known-good) even before any failure
-        let snapshot = state.router.health.snapshot();
-        if let Err(e) = persist::save(&path, &snapshot, util::now_secs()) {
-            log_warn!("cannot persist {}: {}", path.display(), e);
-        }
+        persist::write(&state);
     }
     persist::spawn_flusher(state.clone());
     if mode_dump_models {

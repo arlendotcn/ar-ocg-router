@@ -258,6 +258,8 @@ struct Router {
     child: std::process::Child,
     port: u16,
     log: std::path::PathBuf,
+    /// The temporary directory holding config.yaml, the log and ar-ocg-router.state.json.
+    dir: std::path::PathBuf,
 }
 
 impl Drop for Router {
@@ -275,7 +277,13 @@ fn free_port() -> u16 {
 }
 
 fn start_router(tag: &str, fake_now: &str, build: &dyn Fn(u16) -> String) -> Router {
-    let port = free_port();
+    spawn_router(tag, free_port(), fake_now, build)
+}
+
+/// Start one router process for a fixed port, wiping nothing: the directory is derived from the
+/// port alone, so restarting onto the same port reuses the same config, log and state file - which
+/// is exactly what a real restart looks like.
+fn spawn_router(tag: &str, port: u16, fake_now: &str, build: &dyn Fn(u16) -> String) -> Router {
     let config = build(port);
     let dir = std::env::temp_dir().join(format!("ar-ocg-router-test-{}-{}", tag, port));
     let _ = std::fs::create_dir_all(&dir);
@@ -299,6 +307,7 @@ fn start_router(tag: &str, fake_now: &str, build: &dyn Fn(u16) -> String) -> Rou
         child,
         port,
         log: log_path,
+        dir,
     };
     wait_ready(r.port);
     r
@@ -463,6 +472,35 @@ fn dump_log(r: &Router) {
     }
 }
 
+/// A plans-only config: one prepaid endpoint, no cash account, so every request must land on it.
+fn config_plans_only(port: u16, go: &str) -> String {
+    format!(
+        r#"server:
+  host: 127.0.0.1
+  port: {port}
+  max_connections: 64
+log:
+  level: debug
+  file: ""
+router:
+  mode: plans
+  peak_windows: "Mon-Fri 01:00-04:00, 06:00-10:00 UTC"
+  idle_prefer: surplus_first
+  quota_refresh_secs: 30
+plans:
+  - name: go-1
+    url: {go}/v1
+    key: sk-go-test
+    model: deepseek-flash
+    inject_session: true
+    mode: both
+    provider: opencodego
+"#,
+        port = port,
+        go = go
+    )
+}
+
 fn config_peak_offpeak(port: u16, go: &str, fb: &str, idle_prefer: &str, surplus_max_pct: u32) -> String {
     format!(
         r#"server:
@@ -479,7 +517,6 @@ router:
   surplus_max_pct: {surplus}
   surplus_projection: false
   quota_refresh_secs: 30
-  selection: weighted
 plans:
   - name: go-1
     url: {go}
@@ -487,7 +524,6 @@ plans:
     model: deepseek-flash
     inject_session: true
     mode: both
-    weight: 60
     provider: opencodego
 fallback:
   - name: deepseek-official
@@ -496,7 +532,6 @@ fallback:
     model: deepseek-flash
     mode: both
     rule: [offpeak, quota_low]
-    weight: 50
     provider: deepseek
 "#,
         port = port,
@@ -836,14 +871,12 @@ plans:
     model: model-a
     mode: both
     order: 10
-    weight: 50
   - name: plan-b
     url: {b}/v1
     key: k2
     model: model-b
     mode: both
     order: 20
-    weight: 50
 fallback:
   - name: cash
     url: {c}
@@ -953,14 +986,12 @@ plans:
     model: wrong-model
     mode: both
     order: 10
-    weight: 50
   - name: good-plan
     url: {good}/v1
     key: k2
     model: right-model
     mode: both
     order: 20
-    weight: 50
 fallback:
   - name: cash
     url: {c}
@@ -1040,6 +1071,7 @@ fn config_reload_applies_new_policy() {
         child,
         port,
         log: log.clone(),
+        dir: dir.clone(),
     };
     wait_ready(port);
     let resp = request(port, "POST", "/v1/chat/completions", Some(CHAT_BODY), &[]);
@@ -1087,7 +1119,6 @@ plans:
     model: deepseek-flash
     mode: both
     order: 20
-    weight: 50
   - name: plan-b
     url: {b}/v1
     provider: opencodego
@@ -1095,7 +1126,6 @@ plans:
     model: deepseek-flash
     mode: both
     order: 5
-    weight: 50
 fallback:
   - name: cash
     url: {c}
@@ -1296,7 +1326,6 @@ log:
   file: ""
 router:
   mode: plans
-  selection: weighted
   session_affinity: {aff}
   session_affinity_ttl_secs: 600
   session_fallback: process
@@ -1308,7 +1337,6 @@ plans:
     inject_session: true
     mode: both
     order: 10
-    weight: 50
   - name: ep-b
     url: {b}/v1
     key: k2
@@ -1316,7 +1344,6 @@ plans:
     inject_session: true
     mode: both
     order: 10
-    weight: 50
 fallback:
   - name: cash
     url: {a}/v1
@@ -1510,7 +1537,6 @@ plans:
     model: deepseek-flash
     mode: both
     order: 10
-    weight: 90
     inject_session: true
     quota: {{ unit: usd, rolling: 12, weekly: 30, monthly: 60, probe: usage }}
   - name: ep-b
@@ -1520,7 +1546,6 @@ plans:
     model: deepseek-flash
     mode: both
     order: 20
-    weight: 10
     inject_session: true
     quota: {{ unit: usd, rolling: 12, weekly: 30, monthly: 60, probe: usage }}
 "#,
@@ -1993,7 +2018,6 @@ plans:
     mode: both
     provider: opencodego
     rule: [offpeak]
-    weight: 60
 fallback:
   - name: ds-1
     url: {fb}
@@ -2002,7 +2026,6 @@ fallback:
     mode: both
     provider: deepseek
     rule: [always, no_error_fallback]
-    weight: 50
 "#,
             port = port,
             go = format!("{}/v1", go.url()),
@@ -2110,3 +2133,131 @@ fn renaming_an_endpoint_keeps_its_key() {
 }
 
 
+
+// --------------------------------------------------------------------------- statistics
+
+/// The dashboard counters are a lifetime total, not a per-process one: they are written to the
+/// state file and read back at startup, so a restart does not reset them. "Reset data" is the one
+/// thing that zeroes them, and it deliberately leaves the local quota ledger alone (that ledger is
+/// routing input - clearing it would make a plan look unused and get burned preferentially).
+#[test]
+fn statistics_survive_a_restart_until_they_are_reset() {
+    let go = Mock::start();
+    go.set_quota_pct(12.0);
+    // A fixed port on purpose: the state file lives next to the config, and the directory is
+    // derived from the port, so restarting onto the same port is what makes this a real restart.
+    let port = free_port();
+    let dir = std::env::temp_dir().join(format!("ar-ocg-router-test-stats-persist-{}", port));
+    let _ = std::fs::remove_dir_all(&dir);
+    let build = |port: u16| config_plans_only(port, &go.url());
+
+    let r = spawn_router("stats-persist", port, "2026-09-16T05:00:00Z", &build);
+    wait_quota(r.port, "go-1");
+    for _ in 0..3 {
+        assert_eq!(
+            request(r.port, "POST", "/v1/chat/completions", Some(CHAT_BODY), &[]).status,
+            200
+        );
+    }
+    let before = request(r.port, "GET", "/router/stats", None, &[]).json();
+    assert_eq!(
+        before["accounts"][0]["stats"]["requests"].as_u64(),
+        Some(3),
+        "body={}",
+        before
+    );
+
+    // The flush is rate-limited to one write every 5 seconds.
+    let state_path = r.dir.join("ar-ocg-router.state.json");
+    std::thread::sleep(Duration::from_millis(6000));
+    let text = std::fs::read_to_string(&state_path).expect("state file must exist");
+    let doc: serde_json::Value = serde_json::from_str(&text).expect("state file must be json");
+    assert_eq!(
+        doc["stats"]["go-1"]["requests"].as_u64(),
+        Some(3),
+        "the per-endpoint counters are not in the state file: {}",
+        text
+    );
+    assert!(
+        doc["counters"]["requests"].as_u64().unwrap_or(0) >= 3,
+        "the process-wide counters are not in the state file: {}",
+        text
+    );
+    // The quota ledger is routing input, not a statistic, and must never be persisted.
+    assert!(
+        !text.contains("ledger"),
+        "the local quota ledger leaked into the state file: {}",
+        text
+    );
+
+    // A restart continues from the file instead of dropping back to zero.
+    drop(r);
+    let r = spawn_router("stats-persist", port, "2026-09-16T05:00:00Z", &build);
+    let after = request(r.port, "GET", "/router/stats", None, &[]).json();
+    if after["accounts"][0]["stats"]["requests"].as_u64() != Some(3) {
+        dump_log(&r);
+    }
+    assert_eq!(
+        after["accounts"][0]["stats"]["requests"].as_u64(),
+        Some(3),
+        "per-endpoint counters did not survive the restart: {}",
+        after
+    );
+    assert!(
+        after["counters"]["requests"].as_u64().unwrap_or(0) >= 3,
+        "the process-wide counters did not survive the restart: {}",
+        after
+    );
+
+    // Reset: statistics and failure memory go to zero...
+    let reset = request(r.port, "POST", "/api/stats/reset", Some("{}"), &[]);
+    assert_eq!(reset.status, 200, "body={}", reset.body);
+    let cleared = request(r.port, "GET", "/router/stats", None, &[]).json();
+    assert_eq!(
+        cleared["accounts"][0]["stats"]["requests"].as_u64(),
+        Some(0),
+        "per-endpoint counters survived the reset: {}",
+        cleared
+    );
+    // Exactly one request has been counted since the reset - this very GET that is displaying the
+    // result. If the reset had counted its own POST, the number here would be 2.
+    assert_eq!(
+        cleared["counters"]["requests"].as_u64(),
+        Some(1),
+        "the reset request must not count itself: {}",
+        cleared
+    );
+    // ...while the quota ledger is kept, because clearing it would make a plan look unused and
+    // get burned preferentially. Checking its value here would prove nothing: an OpenCode Go plan
+    // is prepaid, so its traffic produces savings rather than a cash cost and the ledger of a
+    // dollar-priced plan legitimately reads 0.00. What a reset must not do is drop the ledger
+    // object, which is what the routing view reads.
+    assert!(
+        !cleared["accounts"][0]["quota"]["local_ledger"].is_null(),
+        "a statistics reset must keep the local quota ledger: {}",
+        cleared
+    );
+
+    // And the reset is already on disk, so a crash before the next flush cannot bring it back.
+    let text = std::fs::read_to_string(&state_path).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(
+        doc["stats"].as_object().map(|m| m.is_empty()).unwrap_or(true),
+        "the reset was not written to disk: {}",
+        text
+    );
+
+    // A restart after the reset still reads zero.
+    drop(r);
+    let r = spawn_router("stats-persist", port, "2026-09-16T05:00:00Z", &build);
+    let fresh = request(r.port, "GET", "/router/stats", None, &[]).json();
+    if fresh["accounts"][0]["stats"]["requests"].as_u64() != Some(0) {
+        dump_log(&r);
+    }
+    assert_eq!(
+        fresh["accounts"][0]["stats"]["requests"].as_u64(),
+        Some(0),
+        "the reset did not survive a restart: {}",
+        fresh
+    );
+}

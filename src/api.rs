@@ -82,6 +82,9 @@ pub fn handle(state: &Arc<AppState>, req: &Request, out: &mut Responder) -> bool
             );
         }
         ("POST", "/api/config/import") => import_config(state, req, out),
+        ("POST", "/api/stats/reset") => {
+            reset_stats(state, req, out);
+        }
         ("POST", "/api/plan/preview") => plan_preview(state, req, out),
         ("GET", "/api/library") => library_get(state, req, out),
         ("PUT", "/api/library") => library_put(state, req, out),
@@ -138,6 +141,40 @@ pub fn handle(state: &Arc<AppState>, req: &Request, out: &mut Responder) -> bool
         }
     }
     true
+}
+
+// ------------------------------------------------------------------- statistics
+
+/// POST /api/stats/reset - zero the statistics and the endpoint health memory, then checkpoint the
+/// result before answering.
+///
+/// What is NOT reset, deliberately:
+///   * the local quota ledger - it is routing input, and clearing it would make a plan look fresh
+///     and get burned preferentially;
+///   * cooldown clocks and quota readings - those are current facts about the upstream, not
+///     history, and clearing them would send traffic straight back into a cooling endpoint.
+fn reset_stats(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
+    state.registry.reset_stats();
+    state.router.health.clear();
+    crate::persist::reset_counters(state);
+    // The dispatcher counted this request before the reset ran, so the counter sits at 1 and the
+    // console would greet the user with "1 request" right after being told everything is zero.
+    // Discarding it here is exact, not an approximation: concurrent traffic cannot have incremented
+    // the counter between the reset above and this store.
+    state.statics.requests.store(0, std::sync::atomic::Ordering::Relaxed);
+    // Write now, not on the next 5s tick: the console refreshes immediately after this returns, and
+    // a crash before the flush would otherwise bring the old totals back.
+    crate::persist::write(state);
+    log_info!("statistics and endpoint health were reset by the console");
+    json_response(
+        req,
+        out,
+        200,
+        &json!({
+            "reset": true,
+            "note": "statistics and endpoint health cleared; the quota ledger was kept",
+        }),
+    );
 }
 
 // ------------------------------------------------------------------- config view

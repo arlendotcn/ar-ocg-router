@@ -2,7 +2,10 @@
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
+
+use serde_json::{json, Value};
 
 use crate::timeutil;
 
@@ -465,4 +468,90 @@ pub struct Statics {
     /// Successful requests whose prompt was served without upstream cache hits.
     pub cold_starts: std::sync::atomic::AtomicU64,
     pub retries: std::sync::atomic::AtomicU64,
+}
+
+/// A frozen read of Statics, used by the state file and by "reset statistics".
+///
+/// What gets written is the difference against the baseline of the last write, so a counter can be
+/// checkpointed every 5 seconds without counting the same request twice, and a restart continues
+/// from the value in the file instead of from zero.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StaticsSnapshot {
+    pub requests: u64,
+    pub proxied: u64,
+    pub errors: u64,
+    pub streams: u64,
+    pub body_bytes_out: u64,
+    pub plans_used: u64,
+    pub cash_used: u64,
+    pub cold_starts: u64,
+    pub retries: u64,
+}
+
+impl StaticsSnapshot {
+    pub fn to_json(self) -> Value {
+        json!({
+            "requests": self.requests,
+            "proxied": self.proxied,
+            "errors": self.errors,
+            "streams": self.streams,
+            "body_bytes_out": self.body_bytes_out,
+            "plans_used": self.plans_used,
+            "cash_used": self.cash_used,
+            "cold_starts": self.cold_starts,
+            "retries": self.retries,
+        })
+    }
+
+    /// Absent or malformed fields read as zero; a non-object yields None.
+    pub fn from_json(v: &Value) -> Option<StaticsSnapshot> {
+        let o = v.as_object()?;
+        let u = |k: &str| o.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        Some(StaticsSnapshot {
+            requests: u("requests"),
+            proxied: u("proxied"),
+            errors: u("errors"),
+            streams: u("streams"),
+            body_bytes_out: u("body_bytes_out"),
+            plans_used: u("plans_used"),
+            cash_used: u("cash_used"),
+            cold_starts: u("cold_starts"),
+            retries: u("retries"),
+        })
+    }
+}
+
+impl Statics {
+    pub fn snapshot(&self) -> StaticsSnapshot {
+        StaticsSnapshot {
+            requests: self.requests.load(Ordering::Relaxed),
+            proxied: self.proxied.load(Ordering::Relaxed),
+            errors: self.errors.load(Ordering::Relaxed),
+            streams: self.streams.load(Ordering::Relaxed),
+            body_bytes_out: self.body_bytes_out.load(Ordering::Relaxed),
+            plans_used: self.plans_used.load(Ordering::Relaxed),
+            cash_used: self.cash_used.load(Ordering::Relaxed),
+            cold_starts: self.cold_starts.load(Ordering::Relaxed),
+            retries: self.retries.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Adopt a persisted total: counters continue where the previous run stopped.
+    pub fn restore(&self, s: StaticsSnapshot) {
+        self.requests.store(s.requests, Ordering::Relaxed);
+        self.proxied.store(s.proxied, Ordering::Relaxed);
+        self.errors.store(s.errors, Ordering::Relaxed);
+        self.streams.store(s.streams, Ordering::Relaxed);
+        self.body_bytes_out.store(s.body_bytes_out, Ordering::Relaxed);
+        self.plans_used.store(s.plans_used, Ordering::Relaxed);
+        self.cash_used.store(s.cash_used, Ordering::Relaxed);
+        self.cold_starts.store(s.cold_starts, Ordering::Relaxed);
+        self.retries.store(s.retries, Ordering::Relaxed);
+    }
+
+    /// Zero every counter. Callers must checkpoint the baseline immediately, otherwise the next
+    /// flush would write the difference against the old baseline and resurrect the totals.
+    pub fn reset(&self) {
+        self.restore(StaticsSnapshot::default());
+    }
 }

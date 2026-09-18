@@ -69,10 +69,18 @@ as `unknown top-level section` and otherwise ignored.
 - `fallback_spent_usd` is what was actually charged to cash accounts.
 - `cold_starts` counts successful requests whose prompt was not served from upstream cache,
   which is the number to watch when a session is hopping between endpoints.
+- These counters are a **lifetime** total, not a per-process one: they are written to the state
+  file, so restarting the router does not reset them. **Reset data** on the Overview page is what
+  zeroes them - it clears the counters, the per-endpoint statistics and the endpoint failure
+  memory, and writes the state file immediately. The local quota ledger survives a reset on
+  purpose: it feeds routing, and clearing it would make a plan look unused and get used first.
+- If a counter never moves at all, check that the tab is not suspended in the background and
+  that the endpoint actually served the request (`x-router-account` in the response).
 
 ## Uninstalling
 
 `service.ps1 uninstall` (Windows) or `install.sh uninstall` (Linux) removes the service and
 the binary but keeps the configuration and logs. The state file
-`ar-ocg-router.state.json` is advisory and safe to delete; an unreadable or wrong-version
-file is moved aside as `.corrupt` and rebuilt.
+`ar-ocg-router.state.json` is advisory and safe to delete - but deleting it does drop the
+statistics back to zero, because that is where they live. An unreadable or wrong-version file
+is moved aside as `.corrupt` and rebuilt.

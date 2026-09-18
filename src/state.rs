@@ -29,6 +29,71 @@ pub struct AccountStats {
     pub attempts_skipped: u64,
 }
 
+impl AccountStats {
+    /// True when nothing has ever been recorded, so the state file can stay sparse.
+    pub fn is_empty(&self) -> bool {
+        self.requests == 0
+            && self.successes == 0
+            && self.errors == 0
+            && self.stream_requests == 0
+            && self.prompt_tokens == 0
+            && self.completion_tokens == 0
+            && self.cached_tokens == 0
+            && self.cost_usd == 0.0
+            && self.saved_usd == 0.0
+            && self.latency_ms_total == 0
+            && self.last_used == 0
+            && self.last_error.is_none()
+            && self.last_status == 0
+            && self.attempts_skipped == 0
+    }
+
+    /// Serialised into ar-ocg-router.state.json. Additive only: an older file that lacks a field
+    /// loads it as zero.
+    pub fn to_state_json(&self) -> Value {
+        json!({
+            "requests": self.requests,
+            "successes": self.successes,
+            "errors": self.errors,
+            "stream_requests": self.stream_requests,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "cached_tokens": self.cached_tokens,
+            "cost_usd": self.cost_usd,
+            "saved_usd": self.saved_usd,
+            "latency_ms_total": self.latency_ms_total,
+            "last_used": self.last_used,
+            "last_error": self.last_error,
+            "last_status": self.last_status,
+            "attempts_skipped": self.attempts_skipped,
+        })
+    }
+
+    /// Inverse of to_state_json. Returns None when the entry is not an object at all.
+    pub fn from_state_json(v: &Value) -> Option<AccountStats> {
+        let o = v.as_object()?;
+        let u = |k: &str| o.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        let f = |k: &str| o.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let s = |k: &str| o.get(k).and_then(|x| x.as_str()).map(|x| x.to_string());
+        Some(AccountStats {
+            requests: u("requests"),
+            successes: u("successes"),
+            errors: u("errors"),
+            stream_requests: u("stream_requests"),
+            prompt_tokens: u("prompt_tokens"),
+            completion_tokens: u("completion_tokens"),
+            cached_tokens: u("cached_tokens"),
+            cost_usd: f("cost_usd"),
+            saved_usd: f("saved_usd"),
+            latency_ms_total: u("latency_ms_total"),
+            last_used: o.get("last_used").and_then(|x| x.as_i64()).unwrap_or(0),
+            last_error: s("last_error"),
+            last_status: u("last_status") as u16,
+            attempts_skipped: u("attempts_skipped"),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct QuotaWindow {
     pub pct: f64,
@@ -562,6 +627,51 @@ impl Registry {
             Err(p) => p.into_inner().values().cloned().collect(),
         }
     }
+
+    /// Re-attach persisted counters at startup. Unknown names are dropped: an endpoint that no
+    /// longer exists in the config has no runtime object to attach to.
+    pub fn restore_stats(&self, stats: &HashMap<String, AccountStats>) {
+        if stats.is_empty() {
+            return;
+        }
+        let m = match self.map.lock() {
+            Ok(m) => m,
+            Err(p) => p.into_inner(),
+        };
+        let mut restored = 0usize;
+        for (name, st) in stats {
+            if let Some(rt) = m.get(name) {
+                if let Ok(mut cur) = rt.stats.lock() {
+                    *cur = st.clone();
+                    restored += 1;
+                }
+            }
+        }
+        crate::log_info!("restored counters for {} endpoint(s)", restored);
+    }
+
+    /// Zero every per-endpoint counter. The local ledger and the cooldown clocks are left alone:
+    /// the ledger is routing input (not a statistic), and clearing it would make a plan look
+    /// unused and get burned preferentially.
+    pub fn reset_stats(&self) {
+        for rt in self.all() {
+            if let Ok(mut s) = rt.stats.lock() {
+                *s = AccountStats::default();
+            }
+        }
+    }
+}
+
+/// Every endpoint that has recorded something, keyed by name.
+pub fn stats_snapshot(state: &crate::proxy::AppState) -> HashMap<String, AccountStats> {
+    let mut out = HashMap::new();
+    for rt in state.registry.all() {
+        let s = rt.stats.lock().map(|x| x.clone()).unwrap_or_default();
+        if !s.is_empty() {
+            out.insert(rt.name.clone(), s);
+        }
+    }
+    out
 }
 
 /// Account = immutable config + shared runtime state.
