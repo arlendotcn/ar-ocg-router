@@ -19,7 +19,7 @@ import { cn } from "@/lib/utils";
 export function DashboardPage() {
   const { t, lang } = useI18n();
   const toast = useToast();
-  const { stats, error, loading, paused, setPaused, refresh, updatedAt } = useStatsStream();
+  const { stats, error, loading, paused, setPaused, refresh, updatedAt, background } = useStatsStream();
   const [tick, setTick] = React.useState(0);
   // Which endpoint is being toggled right now, so the button cannot be double-fired.
   const [busy, setBusy] = React.useState<string | null>(null);
@@ -216,10 +216,15 @@ export function DashboardPage() {
         hint={t.dash.recentHint}
         actions={
           <>
+            {/* A tab in the background stops polling; without this the last snapshot would sit
+                there looking live. */}
             <span className="mono text-2xs uppercase tracking-[0.12em] text-[var(--ink-faint)]">
-              {paused ? t.dash.paused : t.dash.live}
+              {paused ? t.dash.paused : background ? t.dash.background : t.dash.live}
             </span>
-            <span className={cn("h-[6px] w-[6px] rounded-full", !paused && "live-dot")} style={{ background: paused ? "var(--ink-faint)" : "var(--up)" }} />
+            <span
+              className={cn("h-[6px] w-[6px] rounded-full", !paused && !background && "live-dot")}
+              style={{ background: paused || background ? "var(--ink-faint)" : "var(--up)" }}
+            />
           </>
         }
       >
