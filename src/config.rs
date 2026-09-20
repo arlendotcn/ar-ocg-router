@@ -1328,6 +1328,17 @@ pub fn parse(raw: &str, path: &Path) -> Result<Config, String> {
                         ));
                         quota.used_percent = 0.0;
                     }
+                    // An instant in the future is not a reading anyone could have taken, and the
+                    // report only honours anchors at or before "now", so it would sit in the config
+                    // looking active while doing nothing. Say so instead.
+                    if quota.used_at > crate::util::now_secs() {
+                        warnings.push(format!(
+                            "{}[{}].quota.used_at is in the future, so the calibration cannot apply; ignoring it",
+                            key, idx
+                        ));
+                        quota.used_percent = 0.0;
+                        quota.used_at = 0;
+                    }
                     // tokens are a plain count: keep them integral-ish but allow floats
                     if quota.unit == QuotaUnit::Tokens {
                         quota.rolling = quota.rolling.max(0.0);

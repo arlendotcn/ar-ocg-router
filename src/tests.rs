@@ -702,6 +702,66 @@ plans:
     assert!(c.warnings.iter().any(|w| w.contains("outside 0-100")), "{:?}", c.warnings);
 }
 
+/// A calibration instant must never be pushed forward by an unrelated edit. If it were, the
+/// traffic forwarded since the reading would be counted twice: once from the ledger, and once by
+/// an anchor that now claims to have been taken after it.
+#[test]
+fn a_calibration_instant_survives_an_unrelated_edit() {
+    use crate::config::{QuotaCfg, QuotaUnit};
+    use crate::state::{LocalLedger, QuotaState};
+
+    let at = |s: &str| timeutil::parse_iso8601(s).unwrap();
+    let anchored_at = at("2026-08-28T00:00:00Z");
+    let mut q = QuotaState::default();
+    let cfg = QuotaCfg {
+        unit: QuotaUnit::Rmb,
+        monthly: 200.0,
+        cycle_day: 26,
+        used_percent: 50.0,
+        used_at: anchored_at,
+        ..QuotaCfg::default()
+    };
+    // 20 RMB forwarded after the reading, then evaluated later in the same cycle.
+    q.ledger = LocalLedger::default();
+    q.ledger.add(anchored_at, 20.0, 0);
+    let used_at_later = q.report(at("2026-09-10T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg).monthly.used;
+    assert!((used_at_later - 120.0).abs() < 1e-6, "50% of 200 plus 20 = 120, got {used_at_later}");
+
+    // Had a save moved the instant to Sep 10, the 20 RMB would drop out of the sum.
+    let moved = QuotaCfg { used_at: at("2026-09-10T00:00:00Z"), ..cfg.clone() };
+    let used_if_moved = q.report(at("2026-09-10T00:00:00Z"), 3_600, 80.0, true, 99.0, &moved).monthly.used;
+    assert!(
+        (used_if_moved - 100.0).abs() < 1e-6,
+        "the counterfactual must lose the 20: got {used_if_moved}"
+    );
+    assert!(
+        used_at_later > used_if_moved,
+        "keeping the original instant must retain the intermediate traffic"
+    );
+}
+
+/// An instant in the future cannot describe a reading, and the report only honours anchors at or
+/// before now, so it would sit in the config looking active while doing nothing.
+#[test]
+fn a_future_calibration_instant_is_rejected() {
+    let future = crate::util::now_secs() + 86_400;
+    let yaml = format!(
+        r#"
+plans:
+  - name: p1
+    url: https://example.com/v1
+    key: sk-x
+    model: m
+    quota: {{ unit: rmb, cycle_day: 26, monthly: 200, used_percent: 50, used_at: {future} }}
+"#
+    );
+    let c = config::parse(&yaml, std::path::Path::new("t.yaml")).unwrap();
+    let q = c.find("p1").unwrap();
+    assert_eq!(q.quota.used_percent, 0.0, "a future anchor must be dropped");
+    assert_eq!(q.quota.used_at, 0);
+    assert!(c.warnings.iter().any(|w| w.contains("future")), "{:?}", c.warnings);
+}
+
 // ------------------------------------------------------------------ quota unit reporting
 
 /// A plan budgeted in money with no probe must not claim its used/limit figures are unitless.

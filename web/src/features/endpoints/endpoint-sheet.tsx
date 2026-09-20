@@ -59,10 +59,28 @@ export function EndpointSheet({
     setDraft((d) => (d ? { ...d, quota: { ...d.quota, [k]: v } } : d));
   const setPrices = (patch: Partial<EndpointCfg["prices"]>) =>
     setDraft((d) => (d ? { ...d, prices: { ...d.prices, ...patch } } : d));
-  // Calibrating needs two fields changed together (the reading and the instant it was taken), and
-  // the instant must not survive without a reading.
   const setQuotaPatch = (patch: Partial<EndpointCfg["quota"]>) =>
     setDraft((d) => (d ? { ...d, quota: { ...d.quota, ...patch } } : d));
+
+  /**
+   * Stamp the calibration instant, if and only if the reading actually changed.
+   *
+   * The instant is why a calibration expires: the local figure is "that percentage, plus everything
+   * forwarded since", so it has to mean *when the reading was taken* - which is the moment the user
+   * commits it. It is therefore not a field to reason about, and the console does not show it.
+   *
+   * Comparing against the saved endpoint rather than the draft is what keeps it honest. Editing an
+   * unrelated field on a calibrated endpoint must not push the instant forward, or traffic forwarded
+   * in between would count twice: once from the ledger, and once from a reading that now claims to
+   * have been taken after it.
+   */
+  const stampCalibration = (next: EndpointCfg, saved: EndpointCfg | null): EndpointCfg => {
+    const before = saved?.quota?.used_percent ?? 0;
+    const after = next.quota.used_percent ?? 0;
+    if (after === before) return next;
+    // Clearing the reading clears the instant with it: a percentage is what the anchor describes.
+    return { ...next, quota: { ...next.quota, used_at: after > 0 ? Math.floor(Date.now() / 1000) : 0 } };
+  };
 
   const parseHeaders = (text: string) => {
     const out: Record<string, string> = {};
@@ -121,8 +139,9 @@ export function EndpointSheet({
             variant="primary"
             disabled={errors.length > 0}
             onClick={() => {
-              set("headers", parseHeaders(headersText));
-              setTimeout(() => onCommit({ ...draft, headers: parseHeaders(headersText) }), 0);
+              const headers = parseHeaders(headersText);
+              set("headers", headers);
+              setTimeout(() => onCommit(stampCalibration({ ...draft, headers }, endpoint)), 0);
             }}
           >
             {t.common.confirm}
@@ -281,31 +300,18 @@ export function EndpointSheet({
           {/* Calibration only makes sense on a cycle: it is bounded by the cycle boundary, so
               without one it could never expire. */}
           {draft.quota.unit !== "none" && draft.quota.cycle_day > 0 ? (
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Field label={t.endpoints.usedPercent} help={t.endpoints.usedPercentHint}>
-                <Input
-                  type="number"
-                  min={0}
-                  max={100}
-                  step="0.1"
-                  value={draft.quota.used_percent}
-                  onChange={(e) => {
-                    const pct = Math.min(100, Math.max(0, Number(e.target.value) || 0));
-                    // The instant is what bounds the reading to one cycle, so it is stamped here
-                    // rather than asked for: the user is pasting what the provider's console shows
-                    // right now. Clearing the percentage clears the anchor with it.
-                    setQuotaPatch({ used_percent: pct, used_at: pct > 0 ? Math.floor(Date.now() / 1000) : 0 });
-                  }}
-                />
-              </Field>
-              <Field label={t.endpoints.usedAt} help={t.endpoints.usedAtHint}>
-                <Input
-                  type="number"
-                  value={draft.quota.used_at}
-                  onChange={(e) => setQuota("used_at", Number(e.target.value) || 0)}
-                />
-              </Field>
-            </div>
+            <Field label={t.endpoints.usedPercent} help={t.endpoints.usedPercentHint}>
+              <Input
+                type="number"
+                min={0}
+                max={100}
+                step="0.1"
+                value={draft.quota.used_percent}
+                onChange={(e) =>
+                  setQuotaPatch({ used_percent: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })
+                }
+              />
+            </Field>
           ) : null}
         </Section>
 
