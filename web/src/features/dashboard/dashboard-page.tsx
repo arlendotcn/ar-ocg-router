@@ -13,7 +13,7 @@ import { Meter } from "@/components/ui/meter";
 import { Plate, PlateBlock, Readout } from "@/components/ui/plate";
 import { PageHeader } from "@/components/page-header";
 
-import { fmtBytes, fmtAgo, fmtDuration, fmtMoney, fmtNum, fmtPct, fmtWhen } from "@/lib/format";
+import { fmtBytes, fmtAgo, fmtDuration, fmtMoney, fmtNum, fmtPct, fmtWhen, moneySymbol } from "@/lib/format";
 import type { Account } from "@/types/api";
 import { cn } from "@/lib/utils";
 
@@ -629,7 +629,10 @@ function AccountDetail({ a }: { a: Account }) {
     { key: "weekly", label: t.dash.weekly, v: q.weekly, limit: q.weekly.limit, surplus: q.surplus },
     { key: "monthly", label: t.dash.monthly, v: q.monthly, limit: q.monthly.limit, surplus: q.surplus },
   ];
-  const unit = q.unit === "usd" ? "$" : q.unit === "tokens" ? "" : "";
+  // The windows are money in the endpoint's own currency, or a plain token count. Anything the
+  // server could not name falls back to a bare number rather than inventing a symbol.
+  const money = q.unit === "tokens" ? "" : moneySymbol(q.unit);
+  const digits = money ? 2 : 0;
 
   return (
     <div className="rise border-t border-[var(--line)] bg-[var(--panel-2)] px-3 py-3 sm:px-4">
@@ -645,9 +648,9 @@ function AccountDetail({ a }: { a: Account }) {
                       <span style={{ color: w.v.percent >= 100 ? "var(--danger)" : "var(--ink)" }}>{fmtPct(w.v.percent, 0)}</span>
                       <span className="text-[var(--ink-faint)]">
                         {"  "}
-                        {unit}
-                        {fmtNum(w.v.used, unit ? 2 : 0)}/{unit}
-                        {fmtNum(w.limit, unit ? 0 : 0)}
+                        {money}
+                        {fmtNum(w.v.used, digits)}/{money}
+                        {fmtNum(w.limit, digits)}
                         {w.v.projected_percent > w.v.percent + 1 ? ` · ${t.dash.projected} ${fmtPct(w.v.projected_percent, 0)}` : ""}
                       </span>
                     </>

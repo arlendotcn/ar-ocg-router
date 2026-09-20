@@ -231,6 +231,7 @@ export function EndpointSheet({
               <Select value={draft.quota.unit} onChange={(e) => setQuota("unit", e.target.value as EndpointCfg["quota"]["unit"])}>
                 <option value="none">none</option>
                 <option value="usd">usd</option>
+                <option value="rmb">rmb</option>
                 <option value="tokens">tokens</option>
               </Select>
             </Field>

@@ -201,12 +201,20 @@ impl LocalLedger {
 
     pub fn window_cost(&self, now: i64, period_secs: i64) -> f64 {
         let from = now - period_secs;
-        self.samples
+        let sum: f64 = self
+            .samples
             .iter()
             .rev()
             .take_while(|(ts, _, _)| *ts >= from)
             .map(|(_, c, _)| *c)
-            .sum()
+            .sum();
+        // Summing an empty or all-zero window yields -0.0, which prints as "-0.00" in the console.
+        // Zero money is zero in either sign; the negative zero is an artefact of IEEE addition.
+        if sum == 0.0 {
+            0.0
+        } else {
+            sum
+        }
     }
 
     pub fn window_tokens(&self, now: i64, period_secs: i64) -> u64 {
@@ -264,10 +272,44 @@ pub struct QuotaView {
     pub limit: f64,
 }
 
+/// The measure behind a quota window's numbers, decided together with the local ledger below.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Accounting {
+    /// The windows and the limits are both counted in tokens.
+    Tokens,
+    /// The windows are sums of money in the endpoint's own currency. Which currency is a separate
+    /// label (`prices.currency`); amounts of different currencies are never combined.
+    Money,
+    /// There is nothing to account for; the endpoint's quota is unbounded or unused.
+    None,
+}
+
+/// Decide what a quota block's numbers measure. "none" covers two different situations and they
+/// must not be conflated: a plan whose windows are bounded but unitless is budgeted in money the
+/// config never named (the prices block is the only currency on hand, so the totals are money),
+/// while a plan with no windows at all has nothing to denominate and stays unitless.
+fn accounting_of(quota: &QuotaCfg) -> Accounting {
+    match quota.unit {
+        QuotaUnit::Tokens => Accounting::Tokens,
+        QuotaUnit::Usd | QuotaUnit::Rmb => Accounting::Money,
+        QuotaUnit::None => {
+            if quota.rolling > 0.0 || quota.weekly > 0.0 || quota.monthly > 0.0 {
+                Accounting::Money
+            } else {
+                Accounting::None
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct QuotaReport {
     pub source: QuotaSource,
     pub unit: QuotaUnit,
+    /// What the numbers in this report actually measure. `None` unit means the router cannot say
+    /// anything about the windows, so the consumer should keep reporting `unit`; otherwise the
+    /// ledger is denominated in `prices.currency` and this is what the windows are made of.
+    pub accounting: Accounting,
     pub stale: bool,
     pub exhausted: bool,
     pub surplus: bool,
@@ -350,12 +392,18 @@ impl QuotaState {
         // counter (other tools may have consumed the plan), so we report "no data" and let the
         // router wait for the first reading instead of claiming the quota is unused.
         let trust_empty_ledger = quota.probe == crate::config::QuotaProbe::None;
+        // What the windows are made of. A currency budget is spent from the ledger, whose amounts
+        // are denominated in prices.currency; the "unit" label only names the measure.
+        let accounting = accounting_of(quota);
         let local = |period: i64, limit: f64| -> Option<(f64, f64)> {
             if limit <= 0.0 || quota.unit == QuotaUnit::None {
                 return None;
             }
             let used = match quota.unit {
-                QuotaUnit::Usd => self.ledger.window_cost(now, period),
+                // Both currencies read the same amount: the unit is a label, never a conversion.
+                // Listed explicitly rather than behind a guard, because a guard does not make a
+                // match exhaustive and adding a currency would then fail to compile elsewhere.
+                QuotaUnit::Usd | QuotaUnit::Rmb => self.ledger.window_cost(now, period),
                 QuotaUnit::Tokens => self.ledger.window_tokens(now, period) as f64,
                 QuotaUnit::None => return None,
             };
@@ -392,6 +440,7 @@ impl QuotaState {
                 other => other,
             },
             unit: quota.unit,
+            accounting,
             stale,
             exhausted,
             surplus,
@@ -401,7 +450,10 @@ impl QuotaState {
         }
     }
 
-    pub fn to_json(&self, now: i64, report: &QuotaReport) -> Value {
+    /// `currency` is the endpoint's own money label (`prices.currency`, empty when unset). It is
+    /// only consulted when the windows are money and the config could not name a unit, so that the
+    /// console never shows amounts whose denomination it refuses to state.
+    pub fn to_json(&self, now: i64, report: &QuotaReport, currency: &str) -> Value {
         let w = |v: &QuotaView| {
             json!({
                 "percent": (v.pct * 10.0).round() / 10.0,
@@ -412,9 +464,18 @@ impl QuotaState {
                 "has_data": v.has_data,
             })
         };
+        // Report the measure that actually produced the numbers below. The config's unit names a
+        // unit only when a probe can express one; a ledger-budgeted plan has none, and echoing
+        // "none" next to amounts of money is worse than useless.
+        let unit = match (report.unit, report.accounting) {
+            (QuotaUnit::None, Accounting::Money) if !currency.is_empty() => {
+                currency.to_ascii_lowercase()
+            }
+            _ => report.unit.as_str().to_string(),
+        };
         json!({
             "source": report.source.as_str(),
-            "unit": report.unit.as_str(),
+            "unit": unit,
             "stale": report.stale,
             "fetched_at": if self.fetched_at > 0 { Value::String(timeutil::iso8601(self.fetched_at)) } else { Value::Null },
             "exhausted": report.exhausted,
@@ -526,6 +587,9 @@ impl AccountRuntime {
             Err(_) => QuotaReport {
                 source: QuotaSource::Unknown,
                 unit: quota.unit,
+                // A poisoned lock is not a routing decision; the caller still renders the amounts
+                // from the same ledger, so the measure behind them is unchanged.
+                accounting: accounting_of(quota),
                 stale: true,
                 exhausted: false,
                 surplus: false,
@@ -576,7 +640,7 @@ impl AccountRuntime {
         let quota = self
             .quota
             .lock()
-            .map(|q| q.to_json(now, report))
+            .map(|q| q.to_json(now, report, cfg.prices.currency.as_str()))
             .unwrap_or(Value::Null);
         let balance = self.balance.lock().ok().and_then(|b| {
             b.as_ref().map(|v| {

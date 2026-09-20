@@ -11,7 +11,12 @@ export type QuotaView = {
 
 export type Quota = {
   source: "remote" | "local" | "unknown";
-  unit: "usd" | "tokens" | "none";
+  /**
+   * What the windows below are counted in. The server reports the currency it actually accounted
+   * in, so this is usually `"usd"`/`"rmb"`/`"tokens"`, or `"none"` when nothing is metered. It is a
+   * currency-or-measure label, not a closed set: render it, do not branch on a fixed list.
+   */
+  unit: string;
   stale: boolean;
   fetched_at: string | null;
   exhausted: boolean;
@@ -115,7 +120,7 @@ export type Stats = {
 };
 
 export type QuotaCfg = {
-  unit: "usd" | "tokens" | "none";
+  unit: "usd" | "rmb" | "tokens" | "none";
   rolling: number;
   weekly: number;
   monthly: number;

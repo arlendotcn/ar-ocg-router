@@ -72,10 +72,16 @@ impl Rule {
 }
 
 /// What the account's quota is measured in.
+///
+/// Two currencies rather than one "money": a plan is quoted in the currency its provider bills in,
+/// and the router never converts between them (no rate was ever quoted between two merchants'
+/// prices, and a fabricated one would quietly mis-state how much quota is left).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuotaUnit {
-    /// Dollars (OpenCode Go tracks DeepSeek list prices).
+    /// US dollars (OpenCode Go tracks DeepSeek list prices).
     Usd,
+    /// Renminbi (DeepSeek official, Volcengine Ark, most domestic plans).
+    Rmb,
     /// Plain tokens (most domestic coding/token plans, e.g. 腾讯 Hy Token Plan).
     Tokens,
     /// Nothing measurable: the router only counts what it sent.
@@ -86,13 +92,25 @@ impl QuotaUnit {
     pub fn as_str(&self) -> &'static str {
         match self {
             QuotaUnit::Usd => "usd",
+            QuotaUnit::Rmb => "rmb",
             QuotaUnit::Tokens => "tokens",
             QuotaUnit::None => "none",
         }
     }
+
+    /// Money units share one code path: the ledger keeps an amount, and the currency is only a
+    /// label on it.
+    pub fn is_money(&self) -> bool {
+        matches!(self, QuotaUnit::Usd | QuotaUnit::Rmb)
+    }
+
     pub fn parse(s: &str) -> Option<QuotaUnit> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "usd" | "$" | "dollar" | "dollars" | "money" => Some(QuotaUnit::Usd),
+            "usd" | "$" | "dollar" | "dollars" => Some(QuotaUnit::Usd),
+            "rmb" | "cny" | "yuan" | "¥" | "￥" => Some(QuotaUnit::Rmb),
+            // "money" alone is ambiguous now that there are two currencies: treat it as dollars,
+            // which is what every config written before this existed meant.
+            "money" => Some(QuotaUnit::Usd),
             "token" | "tokens" | "tok" | "credit" | "credits" => Some(QuotaUnit::Tokens),
             "none" | "off" | "na" | "n/a" => Some(QuotaUnit::None),
             _ => None,

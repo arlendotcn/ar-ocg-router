@@ -187,6 +187,28 @@ fn upstream_url_join_handles_v1_prefixes() {
 
 /// Rates are the endpoint's own, so this only has to prove the arithmetic and the peak rule -
 /// whether a given number matches a provider's published price is the operator's business now.
+/// A plan quoted in renminbi is money like any other: the unit labels the amount, it never
+/// converts it. The alias set matters because configs are written by hand.
+#[test]
+fn rmb_is_a_money_unit_and_parses_its_aliases() {
+    for alias in ["rmb", "RMB", "cny", "CNY", "yuan", "¥", "￥"] {
+        assert_eq!(
+            config::QuotaUnit::parse(alias),
+            Some(config::QuotaUnit::Rmb),
+            "{:?} must be accepted as renminbi",
+            alias
+        );
+    }
+    assert_eq!(config::QuotaUnit::Rmb.as_str(), "rmb", "one spelling on the way out");
+    assert!(config::QuotaUnit::Rmb.is_money());
+    assert!(config::QuotaUnit::Usd.is_money());
+    assert!(!config::QuotaUnit::Tokens.is_money());
+    assert!(!config::QuotaUnit::None.is_money());
+    // The bare word "money" predates the second currency: it still means dollars, which is what
+    // every config written before rmb existed meant by it.
+    assert_eq!(config::QuotaUnit::parse("money"), Some(config::QuotaUnit::Usd));
+}
+
 #[test]
 fn endpoint_prices_apply_the_peak_multiplier() {
     let p = config::PricesCfg {
@@ -456,3 +478,93 @@ fn usd_formatting_is_readable() {
     assert!(util::fmt_usd(0.0008265).starts_with("0.00082"), "{}", util::fmt_usd(0.0008265));
     assert_eq!(util::fmt_usd(12.5), "12.5000");
 }
+
+/// An empty window sums to -0.0 under IEEE rules, and the console prints that as "-0.00".
+/// Zero money has no sign, so the accessor normalises it.
+#[test]
+fn an_empty_money_window_is_not_negative_zero() {
+    use crate::state::LocalLedger;
+
+    let l = LocalLedger::default();
+    for (name, v) in [
+        ("total", l.total_cost),
+        ("rolling", l.window_cost(1_000_000, 5 * 3600)),
+        ("weekly", l.window_cost(1_000_000, 7 * 86_400)),
+        ("monthly", l.window_cost(1_000_000, 30 * 86_400)),
+    ] {
+        assert_eq!(v.to_string(), "0", "{name} must not render as -0.0");
+        assert!(v.is_sign_positive(), "{name} must carry no negative sign");
+    }
+}
+
+// ------------------------------------------------------------------ quota unit reporting
+
+/// A plan budgeted in money with no probe must not claim its used/limit figures are unitless.
+/// The unit is what the console prints next to the numbers, and "none" beside an amount of money
+/// is worse than useless.
+#[test]
+fn a_money_budget_without_a_probe_reports_its_currency_as_the_unit() {
+    use crate::config::{QuotaCfg, QuotaProbe, QuotaUnit};
+    use crate::state::{Accounting, QuotaState};
+
+    let q = QuotaState::default();
+    let money = QuotaCfg {
+        rolling: 0.0,
+        weekly: 0.0,
+        monthly: 200.0,
+        probe: QuotaProbe::None,
+        refresh_secs: 300,
+        ..QuotaCfg::for_provider(crate::models::ProviderKind::Generic)
+    };
+
+    // 1. The Ark case as a user would write it: bounded windows, the currency only in prices.
+    //    The unit defaults to "none" for a generic provider, yet the totals are RMB sums.
+    let unstated = QuotaCfg { unit: QuotaUnit::None, ..money.clone() };
+    let r1 = q.report(1_000_000, 3_600, 80.0, true, 99.0, &unstated);
+    assert_eq!(r1.accounting, Accounting::Money, "bounded windows are money");
+    assert_eq!(
+        q.to_json(1_000_000, &r1, "RMB")["unit"],
+        "rmb",
+        "the console must be told the denomination, not shown a bare number"
+    );
+    // An endpoint with no currency label gets the unitless answer rather than an invented symbol.
+    assert_eq!(q.to_json(1_000_000, &r1, "")["unit"], "none");
+
+    // 2. A stated unit is already the answer; prices.currency must not override it.
+    let stated = QuotaCfg { unit: QuotaUnit::Rmb, ..money.clone() };
+    let r2 = q.report(1_000_000, 3_600, 80.0, true, 99.0, &stated);
+    assert_eq!(r2.accounting, Accounting::Money);
+    assert_eq!(q.to_json(1_000_000, &r2, "USD")["unit"], "rmb", "the config wins over the label");
+
+    let tok = QuotaCfg { unit: QuotaUnit::Tokens, ..money.clone() };
+    let r3 = q.report(1_000_000, 3_600, 80.0, true, 99.0, &tok);
+    assert_eq!(r3.accounting, Accounting::Tokens);
+    assert_eq!(q.to_json(1_000_000, &r3, "RMB")["unit"], "tokens");
+
+    // 3. No windows at all: nothing to denominate, so it stays unitless even with prices present.
+    let unbounded = QuotaCfg { unit: QuotaUnit::None, rolling: 0.0, weekly: 0.0, monthly: 0.0, ..money };
+    let r4 = q.report(1_000_000, 3_600, 80.0, true, 99.0, &unbounded);
+    assert_eq!(r4.accounting, Accounting::None, "an unbudgeted plan measures nothing");
+    assert_eq!(q.to_json(1_000_000, &r4, "RMB")["unit"], "none");
+}
+
+/// A probe can express a provider-side unit, so it wins: a plan metered in tokens by the provider
+/// stays tokens even when the config budgets it in money.
+#[test]
+fn a_remote_probe_keeps_its_own_unit() {
+    use crate::config::{QuotaCfg, QuotaProbe, QuotaUnit};
+    use crate::state::QuotaState;
+
+    let cfg = QuotaCfg {
+        unit: QuotaUnit::Tokens,
+        rolling: 0.0,
+        weekly: 0.0,
+        monthly: 1000.0,
+        probe: QuotaProbe::Usage,
+        refresh_secs: 60,
+    };
+    let q = QuotaState::default();
+    let report = q.report(1_000_000, 3_600, 80.0, true, 99.0, &cfg);
+    assert_eq!(q.to_json(1_000_000, &report, "USD")["unit"], "tokens");
+}
+
