@@ -206,9 +206,9 @@ export function EndpointsPage() {
         library={library}
         onClose={() => setEditing(null)}
         onCommit={commit}
-        onTest={async (name) => {
+        onTest={async (endpoint) => {
           try {
-            return await api.testEndpoint(name);
+            return await api.testDraft(endpoint);
           } catch (e) {
             toast.push("err", e instanceof Error ? e.message : String(e));
             return null;

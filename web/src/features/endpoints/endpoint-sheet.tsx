@@ -27,7 +27,8 @@ export function EndpointSheet({
   library: ModelEntry[];
   onClose: () => void;
   onCommit: (e: EndpointCfg) => void;
-  onTest: (name: string) => Promise<TestResult | null>;
+  /** Probes the endpoint as the form currently has it, without saving. */
+  onTest: (endpoint: EndpointCfg) => Promise<TestResult | null>;
 }) {
   const { t, lang } = useI18n();
   const [draft, setDraft] = React.useState<EndpointCfg | null>(endpoint);
@@ -264,7 +265,7 @@ export function EndpointSheet({
         </button>
 
         {advanced ? (
-          <div className="rise space-y-3">
+          <div className="rise space-y-3 border border-[var(--line)] bg-[var(--panel-2)] p-3">
             <Field label={t.endpoints.quotaTitle + " · " + t.endpoints.refreshSecs} help={t.endpoints.refreshSecsHint}>
               <Input
                 type="number"
@@ -325,7 +326,7 @@ export function EndpointSheet({
         {endpoint && endpoint.name ? (
           <Section
             title={t.endpoints.testTitle}
-            hint={t.endpoints.testHint}
+            hint={t.endpoints.testDraftHint}
             aside={
               <Button
                 size="sm"
@@ -333,7 +334,10 @@ export function EndpointSheet({
                 loading={testing}
                 onClick={async () => {
                   setTesting(true);
-                  setResult(await onTest(endpoint.name));
+                  // Probe the form, not the file: a test button sitting next to Save would
+                  // otherwise report on the configuration as it was before the edits above.
+                  set("headers", parseHeaders(headersText));
+                  setResult(await onTest({ ...draft, headers: parseHeaders(headersText) }));
                   setTesting(false);
                 }}
               >

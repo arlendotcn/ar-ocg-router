@@ -1,6 +1,6 @@
 "use client";
 
-import type { ConfigDoc, EndpointModels, ModelLibrary, PlanPreview, Stats, TestResult } from "@/types/api";
+import type { ConfigDoc, EndpointCfg, EndpointModels, ModelLibrary, PlanPreview, Stats, TestResult } from "@/types/api";
 
 /** The console is served by the router itself, so every call is same-origin and relative. */
 const BASE = "";
@@ -104,6 +104,9 @@ export const api = {
     ),
 
   testEndpoint: (name: string) => call<TestResult>("POST", `/api/test/${encodeURIComponent(name)}`, {}),
+  /** Probe the endpoint as the editor currently has it, without saving. */
+  testDraft: (endpoint: EndpointCfg) =>
+    call<TestResult>("POST", "/api/test", { endpoints: [endpoint] }),
 
   setEndpointState: (name: string, enabled: boolean) =>
     call<{ name: string; enabled: boolean; reloaded: boolean }>(

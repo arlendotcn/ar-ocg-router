@@ -120,6 +120,15 @@ impl Mock {
     fn last(&self, path: &str) -> Option<Recorded> {
         self.requests().into_iter().filter(|r| r.path == path).last()
     }
+
+    /// The Authorization value of every request that hit this path, in order.
+    fn headers_of(&self, path: &str) -> Vec<String> {
+        self.requests()
+            .iter()
+            .filter(|r| r.path == path)
+            .filter_map(|r| r.header("authorization").map(|h| h.to_string()))
+            .collect()
+    }
 }
 
 fn read_headers(reader: &mut BufReader<TcpStream>) -> Option<(String, Vec<(String, String)>)> {
@@ -2513,5 +2522,71 @@ plans:
         sent.json()["max_output_tokens"].as_u64(),
         Some(384000),
         "an endpoint without a ceiling must not silently rewrite the value"
+    );
+}
+
+/// The self-test must probe the *draft*, not the saved file: it sits next to Save, so answering
+/// for the old configuration is a trap. A draft pointing at a broken URL has to fail even when the
+/// saved endpoint is healthy, and nothing may be written to the live config.
+#[test]
+fn the_editor_self_test_probes_the_draft_without_saving() {
+    let good = Mock::start();
+    let bad = Mock::start();
+    // The dead upstream answers everything with an error, so a draft pointing at it cannot be
+    // confused with a healthy saved endpoint.
+    bad.set("/v1/models", MockResponse::json(500, "{\"error\":{\"message\":\"draft upstream is down\"}}"));
+    bad.set("/v1/chat/completions", MockResponse::json(500, "{\"error\":{\"message\":\"draft upstream is down\"}}"));
+    let r = start_router("selftest-draft", "2026-09-16T05:00:00Z", &|port| {
+        config_plans_only(port, &good.url())
+    });
+
+    // The saved endpoint is healthy...
+    let live = request(r.port, "POST", "/api/test/go-1", Some("{}"), &[]);
+    assert_eq!(live.status, 200, "body={}", live.body);
+    assert_eq!(live.json()["chat"]["ok"], serde_json::json!(true), "{}", live.json());
+
+    // ...but a draft that changes the URL to a dead port must be reported as failing.
+    let cfg = request(r.port, "GET", "/api/config", None, &[]).json();
+    let mut draft = cfg["endpoints"][0].clone();
+    draft["url"] = serde_json::json!(format!("{}/v1", bad.url()));
+    draft["key"] = serde_json::json!("sk-draft-test");
+    let resp = request(
+        r.port,
+        "POST",
+        "/api/test",
+        Some(&serde_json::json!({ "endpoints": [draft] }).to_string()),
+        &[],
+    );
+    if resp.status != 200 {
+        dump_log(&r);
+    }
+    assert_eq!(resp.status, 200, "body={}", resp.body);
+    let out = resp.json();
+    assert_eq!(
+        out["chat"]["ok"],
+        serde_json::json!(false),
+        "the probe reported the saved endpoint instead of the draft: {}",
+        out
+    );
+
+    // The draft's key is the one that was probed, not the stored one.
+    let hits = bad.headers_of("/v1/models");
+    assert!(
+        hits.iter().any(|h| h == "Bearer sk-draft-test"),
+        "the draft key was not used: {:?}",
+        hits
+    );
+
+    // And the live config still points at the healthy upstream: probing a draft saves nothing.
+    let after = request(r.port, "GET", "/api/config", None, &[]).json();
+    assert_eq!(
+        after["endpoints"][0]["url"].as_str(),
+        cfg["endpoints"][0]["url"].as_str(),
+        "the draft was written to the live config"
+    );
+    assert_eq!(
+        request(r.port, "POST", "/api/test/go-1", Some("{}"), &[]).json()["chat"]["ok"],
+        serde_json::json!(true),
+        "the saved endpoint was damaged by the draft probe"
     );
 }

@@ -86,6 +86,7 @@ pub fn handle(state: &Arc<AppState>, req: &Request, out: &mut Responder) -> bool
             reset_stats(state, req, out);
         }
         ("POST", "/api/plan/preview") => plan_preview(state, req, out),
+        ("POST", "/api/test") => test_draft(state, req, out),
         ("GET", "/api/library") => library_get(state, req, out),
         ("PUT", "/api/library") => library_put(state, req, out),
         ("GET", "/api/backups") => {
@@ -130,7 +131,8 @@ pub fn handle(state: &Arc<AppState>, req: &Request, out: &mut Responder) -> bool
                 }
             }
             if let Some(name) = path.strip_prefix("/api/test/") {
-                return test_endpoint(state, req, out, name);
+                test_endpoint(state, req, out, name);
+                return true;
             }
             if let Some(name) = path.strip_prefix("/api/endpoints/") {
                 if let Some(name) = name.strip_suffix("/models") {
@@ -974,17 +976,70 @@ fn plan_preview(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
 
 /// Probe one endpoint exactly the way the router would use it: catalog, quota, then one minimal
 /// real request. This is the button that answers "is this endpoint actually usable?".
-fn test_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder, name: &str) -> bool {
+///
+/// Tests the endpoint as stored on disk. The console's editor uses POST /api/test instead, which
+/// probes the *draft* - testing a form that still shows unsaved edits would answer for the old
+/// configuration.
+fn test_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder, name: &str) {
     let cfg = state.cfg();
     let Some(acc) = cfg.accounts.iter().find(|a| a.name == name).cloned() else {
         error_response(req, out, 404, &format!("unknown endpoint {:?}", name));
-        return true;
+        return;
     };
+    let rt = state.registry.get_or_create(&acc.name);
+    let payload = selftest_payload(state, &acc, &rt);
+    json_response(req, out, 200, &payload);
+}
+
+/// POST /api/test - probe the endpoint exactly as the editor's form has it, without saving.
+///
+/// The body is the console's endpoint object; it goes through the same YAML conversion the save
+/// path uses (so a placeholder key is resolved against the stored endpoints, and one code path
+/// decides what a valid endpoint looks like), but nothing is written and the live router's runtime
+/// state is untouched: the probe runs against a throwaway runtime.
+fn test_draft(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
+    let doc = match body_json(req) {
+        Ok(v) => v,
+        Err(e) => return error_response(req, out, 400, &e),
+    };
+    let Some(draft) = doc.get("endpoints").and_then(|x| x.as_array()).and_then(|a| a.first()) else {
+        return error_response(req, out, 400, "endpoints[0] is required");
+    };
+    let existing = state.cfg();
+    let old: std::collections::HashMap<&str, &AccountCfg> = existing
+        .accounts
+        .iter()
+        .map(|a| (a.name.as_str(), a))
+        .collect();
+    // endpoint_yaml emits one sequence item, so it needs a section header to become a document.
+    // "fallback" is the right home: a cash endpoint's rules are written explicitly, while a plan
+    // written under fallback would lose the prepaid semantics the probe is supposed to exercise.
+    let item = match endpoint_yaml(draft, &old, 1) {
+        Ok(t) => t,
+        Err(e) => return error_response(req, out, 400, &e),
+    };
+    let yaml = format!("fallback:\n{}", item);
+    let parsed = match crate::config::parse(&yaml, &existing.path) {
+        Ok(c) => c,
+        Err(e) => return error_response(req, out, 400, &format!("config rejected: {}", e)),
+    };
+    let Some(acc) = parsed.accounts.first().cloned() else {
+        return error_response(req, out, 400, "no endpoint to test");
+    };
+    // A draft has no place in the live router yet: a throwaway runtime keeps the probe from
+    // writing backoff/quota state into the real endpoint's runtime.
+    let rt = std::sync::Arc::new(crate::state::AccountRuntime::new(&acc.name));
+    let payload = selftest_payload(state, &acc, &rt);
+    json_response(req, out, 200, &payload);
+}
+
+fn selftest_payload(state: &Arc<AppState>, acc: &AccountCfg, rt: &std::sync::Arc<crate::state::AccountRuntime>) -> Value {
+    let cfg = state.cfg();
     let agent = crate::httpclient::agent(10, 30, 30);
     let ua = cfg.router.user_agent.clone();
     let now = util::now_secs();
 
-    let models = match crate::httpclient::get_json(&agent, &crate::quota::models_url(&acc), &acc.key, &ua) {
+    let models = match crate::httpclient::get_json(&agent, &crate::quota::models_url(acc), &acc.key, &ua) {
         Ok((200, body)) => {
             let ids: Vec<String> = body
                 .get("data")
@@ -1011,13 +1066,13 @@ fn test_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder, name
         Err(e) => json!({"ok": false, "count": 0, "ids": [], "error": util::truncate(&e, 200)}),
     };
 
-    let rt = state.registry.get_or_create(&acc.name);
-    // The background refresher already polls these endpoints; asking again can answer "backoff"
-    // (rate limited) instead of the value. So: try once, then report what is actually stored.
+    // The runtime decides what the quota probe can tell: the live registry already has the
+    // background refresher's readings (so a re-probe may answer "backoff" and the stored value is
+    // reported instead), while a draft's throwaway runtime starts empty and probes fresh.
     let probe_status = if acc.quota.probe == QuotaProbe::Usage {
-        Some(("usage", crate::quota::refresh_usage(&agent, &acc, &rt, now, &ua)))
+        Some(("usage", crate::quota::refresh_usage(&agent, acc, rt, now, &ua)))
     } else if acc.quota.probe == QuotaProbe::Balance {
-        Some(("balance", crate::quota::refresh_balance(&agent, &acc, &rt, now, &ua)))
+        Some(("balance", crate::quota::refresh_balance(&agent, acc, rt, now, &ua)))
     } else {
         None
     };
@@ -1107,20 +1162,14 @@ fn test_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder, name
         }
     }
 
-    json_response(
-        req,
-        out,
-        200,
-        &json!({
-            "name": acc.name,
-            "key_ok": !acc.key.trim().is_empty(),
-            "models": models,
-            "quota": quota,
-            "chat": chat,
-            "suggestions": suggestions,
-        }),
-    );
-    true
+    json!({
+        "name": acc.name,
+        "key_ok": !acc.key.trim().is_empty(),
+        "models": models,
+        "quota": quota,
+        "chat": chat,
+        "suggestions": suggestions,
+    })
 }
 
 /// Whether the console is compiled in; main.rs uses it to decide what to advertise.
