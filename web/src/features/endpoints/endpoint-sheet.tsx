@@ -57,6 +57,8 @@ export function EndpointSheet({
   const set = <K extends keyof EndpointCfg>(k: K, v: EndpointCfg[K]) => setDraft((d) => (d ? { ...d, [k]: v } : d));
   const setQuota = <K extends keyof EndpointCfg["quota"]>(k: K, v: EndpointCfg["quota"][K]) =>
     setDraft((d) => (d ? { ...d, quota: { ...d.quota, [k]: v } } : d));
+  const setPrices = (patch: Partial<EndpointCfg["prices"]>) =>
+    setDraft((d) => (d ? { ...d, prices: { ...d.prices, ...patch } } : d));
 
   const parseHeaders = (text: string) => {
     const out: Record<string, string> = {};
@@ -305,6 +307,61 @@ export function EndpointSheet({
                 }}
               />
             </Field>
+            {/* Rates are per endpoint and per provider, so they belong here rather than in a table
+                inside the binary. A currency alone is a label: the router never converts. */}
+            <Field
+              label={t.endpoints.prices}
+              help={t.endpoints.pricesHint}
+              hint={priceHint(draft, t)}
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <Select
+                  value={draft.prices.currency}
+                  onChange={(e) => setPrices({ currency: e.target.value })}
+                  className="w-[110px] shrink-0"
+                >
+                  <option value="">—</option>
+                  <option value="USD">USD</option>
+                  <option value="CNY">CNY</option>
+                </Select>
+                <span className="mono text-2xs text-[var(--ink-faint)]">{t.endpoints.priceIn}</span>
+                <Input
+                  type="number"
+                  step="0.001"
+                  min={0}
+                  className="w-[92px] shrink-0"
+                  value={draft.prices.input || ""}
+                  onChange={(e) => setPrices({ input: numOr0(e.target.value) })}
+                />
+                <span className="mono text-2xs text-[var(--ink-faint)]">{t.endpoints.priceOut}</span>
+                <Input
+                  type="number"
+                  step="0.001"
+                  min={0}
+                  className="w-[92px] shrink-0"
+                  value={draft.prices.output || ""}
+                  onChange={(e) => setPrices({ output: numOr0(e.target.value) })}
+                />
+                <span className="mono text-2xs text-[var(--ink-faint)]">{t.endpoints.priceCached}</span>
+                <Input
+                  type="number"
+                  step="0.001"
+                  min={0}
+                  className="w-[92px] shrink-0"
+                  value={draft.prices.cached_input || ""}
+                  onChange={(e) => setPrices({ cached_input: numOr0(e.target.value) })}
+                />
+                <span className="mono text-2xs text-[var(--ink-faint)]">{t.endpoints.pricePeak}</span>
+                <Input
+                  type="number"
+                  step="0.1"
+                  min={1}
+                  className="w-[72px] shrink-0"
+                  value={draft.prices.peak_multiplier}
+                  onChange={(e) => setPrices({ peak_multiplier: Number(e.target.value) || 1 })}
+                />
+              </div>
+            </Field>
             <Field label={t.endpoints.headers} help={t.endpoints.headersHint}>
               <Textarea
                 rows={3}
@@ -462,6 +519,19 @@ function SwitchRow({ checked, onChange }: { checked: boolean; onChange: (v: bool
       <span className="mono text-xs text-[var(--ink-faint)]">{checked ? "on" : "off"}</span>
     </div>
   );
+}
+
+const numOr0 = (raw: string) => {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+};
+
+/** What the operator needs to know while filling the rates: whose prices win, and whether these
+ *  numbers are used at all. */
+function priceHint(e: EndpointCfg, t: ReturnType<typeof useI18n>["t"]): string | undefined {
+  const set = e.prices.input > 0 || e.prices.output > 0 || e.prices.cached_input > 0;
+  if (!set) return t.endpoints.pricesUnset;
+  return e.provider === "opencodego" ? t.endpoints.pricesUpstreamWins : undefined;
 }
 
 function inferProvider(url: string): EndpointCfg["provider"] {

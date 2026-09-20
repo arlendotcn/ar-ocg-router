@@ -504,6 +504,7 @@ plans:
     inject_session: true
     mode: both
     provider: opencodego
+    prices: {{ currency: USD, input: 0.15, output: 0.60, cached_input: 0.003, peak_multiplier: 2 }}
 "#,
         port = port,
         go = go
@@ -534,6 +535,7 @@ plans:
     inject_session: true
     mode: both
     provider: opencodego
+    prices: {{ currency: USD, input: 0.15, output: 0.60, cached_input: 0.003, peak_multiplier: 2 }}
 fallback:
   - name: deepseek-official
     url: {fb}
@@ -766,10 +768,12 @@ fn streaming_passthrough_is_incremental_and_accounted() {
     assert_eq!(acc["stats"]["prompt_tokens"], 1000, "stats={}", acc["stats"]);
     assert_eq!(acc["stats"]["completion_tokens"], 500);
     assert_eq!(acc["stats"]["cached_tokens"], 250);
-    // stats are rounded to 6 decimals
-    let cost = acc["stats"]["cost_usd"].as_f64().unwrap();
+    // stats are rounded to 6 decimals, and the unit travels with the number
+    let cost = acc["stats"]["cost"].as_f64().unwrap();
     assert!((cost - 0.0008265).abs() < 1e-6, "cost={}", cost);
-    let saved = v["savings"]["opencodego_saved_usd"].as_f64().unwrap();
+    assert_eq!(acc["stats"]["currency"], "USD", "the endpoint declares its currency");
+    // Savings are grouped by currency rather than summed across them.
+    let saved = v["savings"]["USD"]["saved"].as_f64().unwrap();
     assert!((saved - 0.0008265).abs() < 1e-6, "saved={}", saved);
 }
 
@@ -2192,10 +2196,12 @@ fn statistics_survive_a_restart_until_they_are_reset() {
         "the process-wide counters are not in the state file: {}",
         text
     );
-    // The quota ledger is routing input, not a statistic, and must never be persisted.
+    // The usage ledger IS persisted now, on purpose. It is built from the same requests as the
+    // statistics, which already live here, so keeping it in memory only meant the dashboard and the
+    // quota decision described different periods (one lifetime, one since-restart).
     assert!(
-        !text.contains("ledger"),
-        "the local quota ledger leaked into the state file: {}",
+        doc["ledgers"]["go-1"]["total_cost"].as_f64().unwrap_or(0.0) > 0.0,
+        "the usage ledger is missing from the state file: {}",
         text
     );
 
@@ -2215,6 +2221,16 @@ fn statistics_survive_a_restart_until_they_are_reset() {
     assert!(
         after["counters"]["requests"].as_u64().unwrap_or(0) >= 3,
         "the process-wide counters did not survive the restart: {}",
+        after
+    );
+    // The ledger is now the same lifetime as the statistics, which is the whole point: one screen,
+    // one period.
+    assert!(
+        after["accounts"][0]["quota"]["local_ledger"]["total"]
+            .as_f64()
+            .unwrap_or(0.0)
+            > 0.0,
+        "the usage ledger did not survive the restart: {}",
         after
     );
 

@@ -13,7 +13,6 @@ use crate::models::{
     endpoint_of, normalize_path, parse_forced_endpoint, Endpoint, ForcedEndpoint, Mode,
     ROUTER_MODEL,
 };
-use crate::pricing;
 use crate::router::Router;
 use crate::sse::{extract_usage, UsageScanner};
 use crate::state::{Account, Registry, UsageDelta};
@@ -284,8 +283,8 @@ fn stats_json(state: &Arc<AppState>) -> Value {
     let now = util::now_secs();
     let sched = timeutil::eval_schedule(now, &cfg.router.peak_windows);
     let mut acc_json = Vec::new();
-    let mut saved = 0.0f64;
-    let mut spent = 0.0f64;
+    // currency -> (saved, spent)
+    let mut savings: std::collections::BTreeMap<String, (f64, f64)> = std::collections::BTreeMap::new();
     for acc in accounts.iter() {
         let report = acc.rt.quota_report(now, &cfg, &acc.cfg.quota);
         let mut v = acc.rt.to_json(now, &acc.cfg, &report);
@@ -315,11 +314,31 @@ fn stats_json(state: &Arc<AppState>) -> Value {
         }
         acc_json.push(v);
         let s = acc.rt.stats.lock().map(|x| x.clone()).unwrap_or_default();
-        saved += s.saved_usd;
+        // Grouped by the endpoint's own currency. Adding a dollar figure to a yuan figure would
+        // produce a number that is not money in any currency, and the two providers' prices are not
+        // a currency pair to convert between.
+        let cur = acc.cfg.prices.currency.clone();
+        let key = if cur.is_empty() { "UNSPECIFIED".to_string() } else { cur };
+        let slot = savings.entry(key).or_insert((0.0f64, 0.0f64));
+        slot.0 += s.saved_usd;
         if acc.kind() == AccountKind::Cash {
-            spent += s.cost_usd;
+            slot.1 += s.cost_usd;
         }
     }
+    let savings_json: Value = Value::Object(
+        savings
+            .into_iter()
+            .map(|(cur, (saved, spent))| {
+                (
+                    cur,
+                    json!({
+                        "saved": (saved * 1e6).round() / 1e6,
+                        "spent": (spent * 1e6).round() / 1e6,
+                    }),
+                )
+            })
+            .collect(),
+    );
     json!({
         "router": {
             "version": VERSION,
@@ -356,10 +375,7 @@ fn stats_json(state: &Arc<AppState>) -> Value {
             "cash_used": state.statics.cash_used.load(Ordering::Relaxed),
             "bytes_out": state.statics.body_bytes_out.load(Ordering::Relaxed),
         },
-        "savings": {
-            "opencodego_saved_usd": (saved * 1e6).round() / 1e6,
-            "fallback_spent_usd": (spent * 1e6).round() / 1e6,
-        },
+        "savings": savings_json,
         "accounts": acc_json,
         "warnings": cfg.warnings,
     })
@@ -577,7 +593,7 @@ fn usage_delta(
     is_peak: bool,
     raw: crate::sse::RawUsage,
 ) -> UsageDelta {
-    let family = upstream_model.to_ascii_lowercase();
+    let _ = upstream_model;
     let mut d = UsageDelta {
         prompt_tokens: raw.prompt,
         completion_tokens: raw.completion,
@@ -585,11 +601,20 @@ fn usage_delta(
         cost_usd: 0.0,
         saved_usd: 0.0,
     };
-    let computed = match pricing::prices_for(&family, is_peak) {
-        Some(p) => pricing::cost_of(&p, raw.prompt, raw.cached, raw.completion),
-        None => 0.0,
+    // Priority: what the upstream itself reports > what the endpoint's config says > nothing.
+    // The upstream number is the only one that cannot be stale or mis-typed; the configured rates
+    // are the operator's statement about a provider that does not return a cost at all (DeepSeek
+    // official and Ark both report tokens only). With neither, no money is recorded - a guess
+    // would be worse than a blank.
+    let cost = if raw.upstream_cost > 0.0 {
+        raw.upstream_cost
+    } else if acc.cfg.prices.is_set() {
+        acc.cfg
+            .prices
+            .cost_of(raw.prompt, raw.cached, raw.completion, is_peak)
+    } else {
+        0.0
     };
-    let cost = if computed > 0.0 { computed } else { raw.upstream_cost };
     d.cost_usd = cost;
     if acc.kind() == AccountKind::Plans {
         d.saved_usd = cost;

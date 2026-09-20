@@ -1,8 +1,7 @@
-//! Unit tests for the pure logic (windows, model mapping, config, pricing, SSE usage).
+//! Unit tests for the pure logic (windows, model mapping, config, endpoint prices, SSE usage).
 
 use crate::config;
 use crate::models;
-use crate::pricing;
 use crate::router;
 use crate::sse::{self, UsageScanner};
 use crate::timeutil;
@@ -186,42 +185,36 @@ fn upstream_url_join_handles_v1_prefixes() {
 
 // ------------------------------------------------------------------ pricing
 
+/// Rates are the endpoint's own, so this only has to prove the arithmetic and the peak rule -
+/// whether a given number matches a provider's published price is the operator's business now.
 #[test]
-fn deepseek_prices_match_the_published_table() {
-    let off = pricing::prices_for("deepseek-flash", false).unwrap();
-    let peak = pricing::prices_for("deepseek-flash", true).unwrap();
-    assert!((off.input - 0.15).abs() < 1e-12);
-    assert!((off.output - 0.60).abs() < 1e-12);
-    assert!((off.cached_input - 0.003).abs() < 1e-12);
-    assert!((peak.input - 0.30).abs() < 1e-12);
-    assert!((peak.output - 1.20).abs() < 1e-12);
-    // off-peak is exactly half of peak
-    assert!(((peak.input / 2.0) - off.input).abs() < 1e-12);
-    // pro tier: 0.66/1.98 is off-peak, 1.32/3.96 is peak
-    let pro_off = pricing::prices_for("deepseek-v4-pro", false).unwrap();
-    assert!((pro_off.input - 0.66).abs() < 1e-12);
-    assert!((pro_off.output - 1.98).abs() < 1e-12);
-    let pro_peak = pricing::prices_for("deepseek-v4-pro", true).unwrap();
-    assert!((pro_peak.input - 1.32).abs() < 1e-12);
-    assert!((pro_peak.output - 3.96).abs() < 1e-12);
-    // V4.1 Flash shares the flash price
-    let v41 = pricing::prices_for("deepseek-v4.1-flash", false).unwrap();
-    assert!((v41.input - 0.15).abs() < 1e-12);
-    // non-DeepSeek catalog entries have no peak multiplier
-    let glm = pricing::prices_for("glm-5.3-flash", true).unwrap();
-    assert!((glm.input - 0.075).abs() < 1e-12);
+fn endpoint_prices_apply_the_peak_multiplier() {
+    let p = config::PricesCfg {
+        currency: "USD".to_string(),
+        input: 0.15,
+        output: 0.60,
+        cached_input: 0.003,
+        peak_multiplier: 2.0,
+    };
+    let off = p.cost_of(1000, 400, 200, false);
+    let want_off = (600.0 * 0.15 + 400.0 * 0.003 + 200.0 * 0.60) / 1_000_000.0;
+    assert!((off - want_off).abs() < 1e-15, "{} vs {}", off, want_off);
+    let peak = p.cost_of(1000, 400, 200, true);
+    assert!((peak - want_off * 2.0).abs() < 1e-15, "peak must be the multiplier times off-peak");
+    // cached tokens can never exceed the prompt count
+    let capped = p.cost_of(100, 500, 0, false);
+    assert!((capped - (100.0 * 0.003 / 1_000_000.0)).abs() < 1e-18);
 }
 
 #[test]
-fn cost_math_uses_billed_rates() {
-    let p = pricing::prices_for("deepseek-flash", true).unwrap();
-    // 1000 prompt tokens with 400 cached + 200 completion
-    let cost = pricing::cost_of(&p, 1000, 400, 200);
-    let want = (600.0 * 0.30 + 400.0 * 0.006 + 200.0 * 1.20) / 1_000_000.0;
-    assert!((cost - want).abs() < 1e-12, "{} vs {}", cost, want);
-    // cached tokens never exceed the prompt count
-    let cost2 = pricing::cost_of(&p, 100, 500, 0);
-    assert!((cost2 - (100.0 * 0.006 / 1_000_000.0)).abs() < 1e-15);
+fn absent_prices_record_no_money() {
+    let p = config::PricesCfg::default();
+    assert!(!p.is_set(), "an empty block must not look like a price");
+    assert_eq!(p.cost_of(1000, 400, 200, true), 0.0);
+    // A currency label without rates is still not a price.
+    let labelled = config::PricesCfg { currency: "CNY".to_string(), ..config::PricesCfg::default() };
+    assert!(!labelled.is_set());
+    assert_eq!(labelled.cost_of(1000, 0, 100, false), 0.0);
 }
 
 // ------------------------------------------------------------------ sse usage

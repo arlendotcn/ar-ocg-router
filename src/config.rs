@@ -129,6 +129,65 @@ impl QuotaProbe {
     }
 }
 
+/// What one endpoint charges, in the provider's own currency.
+///
+/// This replaces the built-in price table. A table in the source cannot be right: the same model
+/// is sold by different merchants at different prices in different currencies (OpenCode Go quotes
+/// DeepSeek V4 Flash at $0.15/$0.60, DeepSeek itself at 1/4 CNY), and any published price is a
+/// snapshot that goes stale. So the numbers live in the config, next to the endpoint they belong
+/// to, and an endpoint without them records no money at all rather than a guess.
+///
+/// `currency` is a *label*, never a conversion: nothing here is ever converted to another
+/// currency. Two merchants' prices are not a currency pair, so converting between them would
+/// fabricate precision that does not exist.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PricesCfg {
+    /// Display/labelling unit only ("USD", "CNY", ...). Empty means "prices present but unlabelled".
+    pub currency: String,
+    /// Per 1,000,000 tokens, cache-miss input.
+    pub input: f64,
+    /// Per 1,000,000 tokens, output.
+    pub output: f64,
+    /// Per 1,000,000 tokens, cache-hit input.
+    pub cached_input: f64,
+    /// Multiplier applied during the provider's peak window; 1.0 means "no peak pricing".
+    pub peak_multiplier: f64,
+}
+
+impl Default for PricesCfg {
+    /// Absent prices: the endpoint records no money rather than a guessed one.
+    fn default() -> Self {
+        PricesCfg {
+            currency: String::new(),
+            input: 0.0,
+            output: 0.0,
+            cached_input: 0.0,
+            peak_multiplier: 1.0,
+        }
+    }
+}
+
+impl PricesCfg {
+    /// Are there usable numbers? A currency label alone is not a price.
+    pub fn is_set(&self) -> bool {
+        self.input > 0.0 || self.output > 0.0 || self.cached_input > 0.0
+    }
+
+    pub fn cost_of(&self, prompt: u64, cached: u64, completion: u64, peak: bool) -> f64 {
+        let cached = cached.min(prompt);
+        let miss = prompt.saturating_sub(cached);
+        let base = (miss as f64 * self.input
+            + cached as f64 * self.cached_input
+            + completion as f64 * self.output)
+            / 1_000_000.0;
+        if peak && self.peak_multiplier > 0.0 {
+            base * self.peak_multiplier
+        } else {
+            base
+        }
+    }
+}
+
 /// Sliding-window quota of one account.
 #[derive(Debug, Clone)]
 pub struct QuotaCfg {
@@ -145,16 +204,22 @@ pub struct QuotaCfg {
 }
 
 impl QuotaCfg {
-    /// Defaults per provider: OpenCode Go tracks dollar windows (5h 20% / week 50% / month 100%
-    /// of a $60 monthly plan), DeepSeek official has no quota (balance instead), everything else
-    /// is unmeasurable until the user says otherwise.
+    /// Defaults per provider: OpenCode Go tracks dollar windows (5h 20% / week 50% / month 100% of
+    /// the plan), DeepSeek official has no quota (balance instead), everything else is unmeasurable
+    /// until the user says otherwise.
+    ///
+    /// The Go figures are the **non-promotional** windows (3 / 7.5 / 15 USD, i.e. the 20/50/100%
+    /// shape of a $15 month). A promotion changes the grant, not the shape, so the promo numbers
+    /// belong in the config where a date can be written next to them - a default compiled into the
+    /// binary would silently under-report quota the day a promotion ends, or over-report it while
+    /// one is running.
     pub fn for_provider(provider: ProviderKind) -> QuotaCfg {
         match provider {
             ProviderKind::OpencodeGo => QuotaCfg {
                 unit: QuotaUnit::Usd,
-                rolling: 12.0,
-                weekly: 30.0,
-                monthly: 60.0,
+                rolling: 3.0,
+                weekly: 7.5,
+                monthly: 15.0,
                 probe: QuotaProbe::Usage,
                 refresh_secs: 60,
             },
@@ -208,6 +273,8 @@ pub struct AccountCfg {
     pub max_output_tokens_limit: u64,
     pub drop_params: Vec<String>,
     pub extra_headers: Vec<(String, String)>,
+    /// What this endpoint charges, if it charges per token. Empty = unknown, record no money.
+    pub prices: PricesCfg,
     pub quota: QuotaCfg,
     pub inject_session: bool,
     /// Explicit opt-out written by the console ("enabled: false"). Kept separate from the rule
@@ -1014,6 +1081,30 @@ pub fn parse(raw: &str, path: &Path) -> Result<Config, String> {
                     warnings.push(format!("{}[{}].max_output_tokens_limit {} is negative, ignored", key, idx, n));
                 }
             }
+            let mut prices = PricesCfg::default();
+            if let Some(pm) = yget_any(m, &["prices", "price", "pricing"]).and_then(ymap) {
+                if let Some(c) = yget_any(pm, &["currency", "unit"]).and_then(ystr) {
+                    prices.currency = c.trim().to_ascii_uppercase();
+                }
+                prices.input = yget(pm, "input").map(|v| yfloat(v, 0.0)).unwrap_or(0.0);
+                prices.output = yget(pm, "output").map(|v| yfloat(v, 0.0)).unwrap_or(0.0);
+                prices.cached_input = yget_any(pm, &["cached_input", "input_cached", "cache"])
+                    .map(|v| yfloat(v, 0.0))
+                    .unwrap_or(0.0);
+                prices.peak_multiplier = yget_any(pm, &["peak_multiplier", "peak_factor"])
+                    .map(|v| yfloat(v, 1.0))
+                    .unwrap_or(1.0);
+                if prices.input < 0.0 || prices.output < 0.0 || prices.cached_input < 0.0 {
+                    warnings.push(format!("{}[{}].prices has a negative rate, ignoring the block", key, idx));
+                    prices = PricesCfg::default();
+                }
+                if prices.peak_multiplier < 1.0 {
+                    warnings.push(format!(
+                        "{}[{}].prices.peak_multiplier {} < 1 (peak cheaper than off-peak?), keeping it",
+                        key, idx, prices.peak_multiplier
+                    ));
+                }
+            }
             if let Some(v) = yget_any(m, &["rule", "rules", "when"]) {
                 for tok in ytokens(v) {
                     let t = tok.trim().to_ascii_lowercase().replace('-', "_");
@@ -1218,6 +1309,7 @@ pub fn parse(raw: &str, path: &Path) -> Result<Config, String> {
                 max_output_tokens_limit,
                 drop_params,
                 extra_headers,
+                prices,
                 quota,
                 inject_session,
                 disabled,

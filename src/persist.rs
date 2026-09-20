@@ -29,13 +29,17 @@ pub fn state_path(config_path: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(STATE_FILE))
 }
 
-/// Everything that survives a restart. The local quota ledger is deliberately absent: it is
-/// routing input, not a statistic, and inventing usage the provider never confirmed would
-/// mis-route the plans.
+/// Everything that survives a restart.
+///
+/// The ledger is included even though it is routing input: it is built from the same requests as
+/// the statistics, which are already written here, so leaving it out only made two numbers on one
+/// screen describe different periods.
 #[derive(Debug, Default)]
 pub struct Persisted {
     pub health: HashMap<String, EndpointHealth>,
     pub stats: HashMap<String, crate::state::AccountStats>,
+    /// Sliding-window usage per endpoint (aggregate + tail of samples).
+    pub ledgers: HashMap<String, crate::state::LocalLedger>,
     /// Process-wide counters (requests / streams / retries / bytes).
     pub counters: Option<crate::httpd::StaticsSnapshot>,
 }
@@ -76,10 +80,16 @@ pub fn load(path: &Path) -> Persisted {
                 }
             }
         }
+        let mut ledgers = HashMap::new();
+        if let Some(xs) = v.get("ledgers").and_then(|x| x.as_object()) {
+            for (name, l) in xs {
+                ledgers.insert(name.clone(), crate::state::LocalLedger::from_state_json(l));
+            }
+        }
         let counters = v
             .get("counters")
             .and_then(crate::httpd::StaticsSnapshot::from_json);
-        Some(Persisted { health, stats, counters })
+        Some(Persisted { health, stats, ledgers, counters })
     };
     match parse(&text) {
         Some(p) => {
@@ -135,8 +145,16 @@ pub fn save(path: &Path, data: &Persisted, now: i64) -> Result<(), String> {
         }
         stats.insert(name.clone(), s.to_state_json());
     }
+    let mut ledgers = serde_json::Map::new();
+    for (name, l) in &data.ledgers {
+        if l.total_cost == 0.0 && l.total_tokens == 0 && l.samples.is_empty() {
+            continue;
+        }
+        ledgers.insert(name.clone(), l.to_state_json());
+    }
     obj.insert("endpoints".to_string(), Value::Object(endpoints));
     obj.insert("stats".to_string(), Value::Object(stats));
+    obj.insert("ledgers".to_string(), Value::Object(ledgers));
     obj.insert(
         "counters".to_string(),
         data.counters.map(|c| c.to_json()).unwrap_or(Value::Null),
@@ -166,6 +184,7 @@ pub fn snapshot(state: &Arc<crate::proxy::AppState>) -> Persisted {
     Persisted {
         health: state.router.health.snapshot(),
         stats: crate::state::stats_snapshot(state),
+        ledgers: crate::state::ledger_snapshot(state),
         counters: if counters == crate::httpd::StaticsSnapshot::default() {
             None
         } else {

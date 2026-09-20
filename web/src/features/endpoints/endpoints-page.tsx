@@ -11,7 +11,7 @@ import { ConfirmButton } from "@/components/ui/confirm-button";
 import { Plate, PlateBlock } from "@/components/ui/plate";
 import { PageHeader } from "@/components/page-header";
 import { EndpointSheet } from "./endpoint-sheet";
-import { fmtUsd } from "@/lib/format";
+import { fmtMoney } from "@/lib/format";
 import type { EndpointCfg, ModelEntry } from "@/types/api";
 import { useStatsStream } from "@/lib/use-stats";
 import { cn } from "@/lib/utils";
@@ -28,6 +28,7 @@ const BLANK: EndpointCfg = {
   rules: ["always"],
   no_error_fallback: false,
   max_output_tokens_limit: 0,
+  prices: { currency: "", input: 0, output: 0, cached_input: 0, peak_multiplier: 1 },
   inject_session: false,
   headers: {},
   drop_params: [],
@@ -57,9 +58,9 @@ export function EndpointsPage() {
   // finished endpoint, which is written straight away.
   const doc = cfg.doc;
   const liveByName = React.useMemo(() => {
-    const m = new Map<string, { requests: number; saved: number; cost: number; available: boolean }>();
+    const m = new Map<string, { requests: number; saved: number; cost: number; available: boolean; currency: string }>();
     stats?.accounts.forEach((a) =>
-      m.set(a.name, { requests: a.stats.requests, saved: a.stats.saved_usd, cost: a.stats.cost_usd, available: a.available }),
+      m.set(a.name, { requests: a.stats.requests, saved: a.stats.saved, cost: a.stats.cost, available: a.available, currency: a.stats.currency }),
     );
     return m;
   }, [stats]);
@@ -240,7 +241,7 @@ function SideList({
   onLiveToggle: (name: string, enabled: boolean) => void;
   onDuplicate: (name: string) => void;
   onReorder: (from: number, to: number) => void;
-  liveByName: Map<string, { requests: number; saved: number; cost: number; available: boolean }>;
+  liveByName: Map<string, { requests: number; saved: number; cost: number; available: boolean; currency: string }>;
 }) {
   const { t } = useI18n();
   const tone = kind === "plans" ? "var(--plans)" : "var(--cash)";
@@ -345,7 +346,7 @@ function SideList({
                 <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto">
                   {live ? (
                     <span className="mono hidden text-2xs text-[var(--ink-faint)] md:inline">
-                      {live.requests} req · {kind === "plans" ? fmtUsd(live.saved) : fmtUsd(live.cost)}
+                      {live.requests} req · {fmtMoney(kind === "plans" ? live.saved : live.cost, live.currency)}
                     </span>
                   ) : null}
                   <Button size="sm" variant={enabled ? "ghost" : "outline"} onClick={() => onEdit(i, e)}>

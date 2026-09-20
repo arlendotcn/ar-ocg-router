@@ -59,8 +59,10 @@ impl AccountStats {
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "cached_tokens": self.cached_tokens,
-            "cost_usd": self.cost_usd,
-            "saved_usd": self.saved_usd,
+            // No currency in the field name: the unit is the endpoint's, and it is carried
+            // alongside the statistics rather than baked into the key.
+            "cost": self.cost_usd,
+            "saved": self.saved_usd,
             "latency_ms_total": self.latency_ms_total,
             "last_used": self.last_used,
             "last_error": self.last_error,
@@ -83,8 +85,8 @@ impl AccountStats {
             prompt_tokens: u("prompt_tokens"),
             completion_tokens: u("completion_tokens"),
             cached_tokens: u("cached_tokens"),
-            cost_usd: f("cost_usd"),
-            saved_usd: f("saved_usd"),
+            cost_usd: f("cost"),
+            saved_usd: f("saved"),
             latency_ms_total: u("latency_ms_total"),
             last_used: o.get("last_used").and_then(|x| x.as_i64()).unwrap_or(0),
             last_error: s("last_error"),
@@ -129,7 +131,57 @@ pub struct LocalLedger {
     pub total_tokens: u64,
 }
 
+/// How many samples are written to the state file. The live ledger keeps far more, but the file is
+/// rewritten every few seconds, and a sliding window never reaches back further than a month: 2000
+/// samples cover any realistic request rate while keeping the file small.
+const PERSISTED_SAMPLES: usize = 2000;
+
 impl LocalLedger {
+    /// Totals plus a bounded tail of samples, for the state file.
+    ///
+    /// The ledger used to be memory-only on the grounds that it is routing input, and persisting it
+    /// would invent usage the provider never confirmed. That reasoning stopped holding once the
+    /// statistics themselves became persistent: the same requests were already being written to the
+    /// same file, so a memory-only ledger only meant two numbers on one screen counted different
+    /// periods (the dashboard showed a lifetime total, the quota decision a since-restart one).
+    pub fn to_state_json(&self) -> Value {
+        let samples: Vec<Value> = self
+            .samples
+            .iter()
+            .rev()
+            .take(PERSISTED_SAMPLES)
+            .rev()
+            .map(|(ts, cost, tokens)| json!([ts, cost, tokens]))
+            .collect();
+        json!({
+            "total_cost": self.total_cost,
+            "total_tokens": self.total_tokens,
+            "samples": samples,
+        })
+    }
+
+    pub fn from_state_json(v: &Value) -> LocalLedger {
+        let mut l = LocalLedger::default();
+        let Some(o) = v.as_object() else { return l };
+        l.total_cost = o.get("total_cost").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        l.total_tokens = o.get("total_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+        if let Some(list) = o.get("samples").and_then(|x| x.as_array()) {
+            for item in list {
+                let Some(t) = item.as_array() else { continue };
+                if t.len() != 3 {
+                    continue;
+                }
+                let ts = t[0].as_i64().unwrap_or(0);
+                let cost = t[1].as_f64().unwrap_or(0.0);
+                let tokens = t[2].as_u64().unwrap_or(0);
+                if ts > 0 {
+                    l.samples.push_back((ts, cost, tokens));
+                }
+            }
+        }
+        l
+    }
+
     pub fn add(&mut self, now: i64, cost: f64, tokens: u64) {
         self.samples.push_back((now, cost, tokens));
         self.total_cost += cost;
@@ -371,11 +423,12 @@ impl QuotaState {
             "rolling": w(&report.rolling),
             "weekly": w(&report.weekly),
             "monthly": w(&report.monthly),
+            // The suffix is gone: the unit is the endpoint's currency, not necessarily dollars.
             "local_ledger": {
-                "total_usd": (self.ledger.total_cost * 1e6).round() / 1e6,
-                "rolling_usd": (self.ledger.window_cost(now, PERIOD_ROLLING) * 1e6).round() / 1e6,
-                "weekly_usd": (self.ledger.window_cost(now, PERIOD_WEEKLY) * 1e6).round() / 1e6,
-                "monthly_usd": (self.ledger.window_cost(now, PERIOD_MONTHLY) * 1e6).round() / 1e6,
+                "total": (self.ledger.total_cost * 1e6).round() / 1e6,
+                "rolling": (self.ledger.window_cost(now, PERIOD_ROLLING) * 1e6).round() / 1e6,
+                "weekly": (self.ledger.window_cost(now, PERIOD_WEEKLY) * 1e6).round() / 1e6,
+                "monthly": (self.ledger.window_cost(now, PERIOD_MONTHLY) * 1e6).round() / 1e6,
             },
             "last_error": self.last_error,
         })
@@ -561,8 +614,11 @@ impl AccountRuntime {
                 "prompt_tokens": s.prompt_tokens,
                 "completion_tokens": s.completion_tokens,
                 "cached_tokens": s.cached_tokens,
-                "cost_usd": (s.cost_usd * 1e6).round() / 1e6,
-                "saved_usd": (s.saved_usd * 1e6).round() / 1e6,
+                // The unit travels with the number, so a reader never has to guess (or, worse,
+                // assume dollars because that used to be the only possibility).
+                "currency": cfg.prices.currency,
+                "cost": (s.cost_usd * 1e6).round() / 1e6,
+                "saved": (s.saved_usd * 1e6).round() / 1e6,
                 "avg_latency_ms": if s.requests > 0 { s.latency_ms_total / s.requests } else { 0 },
                 "last_used": if s.last_used > 0 { Value::String(timeutil::iso8601(s.last_used)) } else { Value::Null },
                 "last_error": s.last_error,
@@ -650,6 +706,29 @@ impl Registry {
         crate::log_info!("restored counters for {} endpoint(s)", restored);
     }
 
+    /// Re-attach persisted ledgers at startup, so the quota view and the statistics cover the same
+    /// period instead of one being since-restart.
+    pub fn restore_ledgers(&self, ledgers: &HashMap<String, LocalLedger>) {
+        if ledgers.is_empty() {
+            return;
+        }
+        let m = match self.map.lock() {
+            Ok(m) => m,
+            Err(p) => p.into_inner(),
+        };
+        let mut restored = 0usize;
+        for (name, l) in ledgers {
+            let Some(rt) = m.get(name) else { continue };
+            let mut q = match rt.quota.lock() {
+                Ok(q) => q,
+                Err(p) => p.into_inner(),
+            };
+            q.ledger = l.clone();
+            restored += 1;
+        }
+        crate::log_info!("restored usage ledgers for {} endpoint(s)", restored);
+    }
+
     /// Zero every per-endpoint counter. The local ledger and the cooldown clocks are left alone:
     /// the ledger is routing input (not a statistic), and clearing it would make a plan look
     /// unused and get burned preferentially.
@@ -660,6 +739,21 @@ impl Registry {
             }
         }
     }
+}
+
+/// Every endpoint's sliding-window ledger, keyed by name.
+pub fn ledger_snapshot(state: &crate::proxy::AppState) -> HashMap<String, LocalLedger> {
+    let mut out = HashMap::new();
+    for rt in state.registry.all() {
+        let l = match rt.quota.lock() {
+            Ok(q) => q.ledger.clone(),
+            Err(p) => p.into_inner().ledger.clone(),
+        };
+        if l.total_cost != 0.0 || l.total_tokens != 0 || !l.samples.is_empty() {
+            out.insert(rt.name.clone(), l);
+        }
+    }
+    out
 }
 
 /// Every endpoint that has recorded something, keyed by name.

@@ -13,7 +13,7 @@ import { Meter } from "@/components/ui/meter";
 import { Plate, PlateBlock, Readout } from "@/components/ui/plate";
 import { PageHeader } from "@/components/page-header";
 
-import { fmtBytes, fmtAgo, fmtDuration, fmtNum, fmtPct, fmtUsd, fmtWhen } from "@/lib/format";
+import { fmtBytes, fmtAgo, fmtDuration, fmtMoney, fmtNum, fmtPct, fmtWhen } from "@/lib/format";
 import type { Account } from "@/types/api";
 import { cn } from "@/lib/utils";
 
@@ -243,20 +243,24 @@ export function DashboardPage() {
             sub={`${t.dash.retries} ${fmtNum(c.retries)} · ${fmtBytes(c.bytes_out)}`}
           />
         </Plate>
-        <Plate className="rise">
-          <Readout
-            label={t.dash.saved}
-            value={<span style={{ color: "var(--up)" }}>{fmtUsd(stats.savings.opencodego_saved_usd)}</span>}
-            help={t.dash.savedHint}
-          />
-        </Plate>
-        <Plate className="rise">
-          <Readout
-            label={t.dash.spent}
-            value={<span style={{ color: "var(--cash)" }}>{fmtUsd(stats.savings.fallback_spent_usd)}</span>}
-            help={t.dash.spentHint}
-          />
-        </Plate>
+        {/* One card per currency, because these are not one sum: see the note on savings_json.
+            A currency with no endpoints of its own simply has no card. */}
+        {Object.entries(stats.savings).map(([cur, v]) => (
+          <Plate className="rise" key={cur}>
+            <Readout
+              label={cur === "UNSPECIFIED" ? t.dash.saved : `${t.dash.saved} · ${cur}`}
+              value={
+                <span className="mono text-sm leading-tight">
+                  <span style={{ color: "var(--up)" }}>{fmtMoney(v.saved, cur)}</span>
+                  <span className="mx-1.5 text-[var(--ink-faint)]">/</span>
+                  <span style={{ color: "var(--cash)" }}>{fmtMoney(v.spent, cur)}</span>
+                </span>
+              }
+              sub={`${t.dash.saved} / ${t.dash.spent}`}
+              help={t.dash.savedHint}
+            />
+          </Plate>
+        ))}
       </div>
 
       {/* ---- per side summary ---- */}
@@ -345,7 +349,13 @@ function SideSummary({ kind, accounts, used }: { kind: "plans" | "fallback"; acc
   const tone = kind === "plans" ? "var(--plans)" : "var(--cash)";
   const healthy = accounts.filter((a) => a.available).length;
   const tokens = accounts.reduce((n, a) => n + a.stats.prompt_tokens + a.stats.completion_tokens, 0);
-  const cost = accounts.reduce((n, a) => n + (kind === "plans" ? a.stats.saved_usd : a.stats.cost_usd), 0);
+  // Summed per currency: a plan billed in yuan and one billed in dollars cannot be added, and the
+  // side list can hold both.
+  const costs = accounts.reduce<Record<string, number>>((m, a) => {
+    const cur = a.stats.currency || "UNSPECIFIED";
+    m[cur] = (m[cur] ?? 0) + (kind === "plans" ? a.stats.saved : a.stats.cost);
+    return m;
+  }, {});
   return (
     <Plate className="rise">
       <div className="flex items-center justify-between border-b border-[var(--line)] px-3 py-2">
@@ -358,7 +368,18 @@ function SideSummary({ kind, accounts, used }: { kind: "plans" | "fallback"; acc
       </div>
       <div className="grid grid-cols-3 divide-x divide-[var(--line)]">
         <Readout label={t.dash.tokens} value={fmtNum(tokens)} sub={kind === "plans" ? t.dash.saved : t.dash.cost} />
-        <Readout label={kind === "plans" ? t.dash.saved : t.dash.cost} value={fmtUsd(cost)} />
+        <Readout
+          label={kind === "plans" ? t.dash.saved : t.dash.cost}
+          value={
+            <span className="mono text-sm leading-tight">
+              {Object.entries(costs).map(([cur, v]) => (
+                <span key={cur} className="mr-2 inline-block">
+                  {fmtMoney(v, cur)}
+                </span>
+              ))}
+            </span>
+          }
+        />
         <Readout
           label={t.common.enabled}
           value={`${accounts.filter((a) => a.enabled !== false).length}/${accounts.length}`}
@@ -575,9 +596,9 @@ function AccountRow({
           </span>
           <span className="mono hidden w-[86px] shrink-0 text-right text-sm md:block">
             {a.kind === "plans" ? (
-              <span style={{ color: "var(--up)" }}>{fmtUsd(a.stats.saved_usd)}</span>
+              <span style={{ color: "var(--up)" }}>{fmtMoney(a.stats.saved, a.stats.currency)}</span>
             ) : (
-              <span style={{ color: "var(--cash)" }}>{fmtUsd(a.stats.cost_usd)}</span>
+              <span style={{ color: "var(--cash)" }}>{fmtMoney(a.stats.cost, a.stats.currency)}</span>
             )}
           </span>
             <span className="shrink-0 text-2xs text-[var(--ink-faint)]">{open ? "▴" : "▾"}</span>

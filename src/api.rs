@@ -206,6 +206,13 @@ fn account_cfg_json(a: &AccountCfg) -> Value {
         "rules": a.rules.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
         "no_error_fallback": a.no_error_fallback,
         "max_output_tokens_limit": a.max_output_tokens_limit,
+        "prices": {
+            "currency": a.prices.currency,
+            "input": a.prices.input,
+            "output": a.prices.output,
+            "cached_input": a.prices.cached_input,
+            "peak_multiplier": a.prices.peak_multiplier,
+        },
         "inject_session": a.inject_session,
         "headers": Value::Object(headers),
         "drop_params": a.drop_params,
@@ -535,6 +542,37 @@ fn endpoint_yaml(
         .unwrap_or_else(|| old.get(name.as_str()).map(|a| a.max_output_tokens_limit).unwrap_or(0));
     if limit > 0 {
         s.push_str(&format!("max_output_tokens_limit: {}\n", limit));
+        s.push_str(cont);
+    }
+    // Rates travel with the endpoint they describe. Written only when set: an absent block means
+    // "no money recorded", which is different from a block of zeros. A console that has no fields
+    // for these still carries the live values through, so a save cannot wipe them.
+    let live = old.get(name.as_str());
+    let cur = e
+        .get("prices")
+        .and_then(|p| p.get("currency"))
+        .and_then(|c| c.as_str())
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| live.map(|a| a.prices.currency.clone()).unwrap_or_default());
+    let (i, o, ci) = (
+        e.get("prices").and_then(|p| p.get("input")).and_then(|v| v.as_f64())
+            .unwrap_or_else(|| live.map(|a| a.prices.input).unwrap_or(0.0)),
+        e.get("prices").and_then(|p| p.get("output")).and_then(|v| v.as_f64())
+            .unwrap_or_else(|| live.map(|a| a.prices.output).unwrap_or(0.0)),
+        e.get("prices").and_then(|p| p.get("cached_input")).and_then(|v| v.as_f64())
+            .unwrap_or_else(|| live.map(|a| a.prices.cached_input).unwrap_or(0.0)),
+    );
+    let pm = e
+        .get("prices")
+        .and_then(|p| p.get("peak_multiplier"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or_else(|| live.map(|a| a.prices.peak_multiplier).unwrap_or(1.0));
+    if i > 0.0 || o > 0.0 || ci > 0.0 {
+        let cur = if cur.trim().is_empty() { "USD".to_string() } else { cur };
+        s.push_str(&format!(
+            "prices: {{ currency: {}, input: {}, output: {}, cached_input: {}, peak_multiplier: {} }}\n",
+            cur, i, o, ci, pm
+        ));
         s.push_str(cont);
     }
     let q = e.get("quota").cloned().unwrap_or(Value::Null);

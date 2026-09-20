@@ -15,7 +15,6 @@ mod httpd;
 mod library;
 mod logger;
 mod models;
-mod pricing;
 mod proxy;
 mod persist;
 mod redact;
@@ -308,6 +307,7 @@ fn main() {
         persist::restore_counters(&state, saved.counters.unwrap_or_default());
         state.router.health.restore(saved.health);
         state.registry.restore_stats(&saved.stats);
+        state.registry.restore_ledgers(&saved.ledgers);
         // write once at startup so the file exists (and is known-good) even before any failure
         persist::write(&state);
     }

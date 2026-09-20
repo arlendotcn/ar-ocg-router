@@ -81,12 +81,19 @@ plans:
     mode: both
     order: 10
     inject_session: true                      # Go 要求 x-opencode-session，显式开启
+    # Go 的额度窗口：5h / 周 / 月，单位美元。不写就用内置的非促销默认值（3 / 7.5 / 15）。
+    # 促销期额度更大（例如 12 / 30 / 60）；促销会结束，所以写在配置里、而不是编译进二进制。
     quota: { unit: usd, rolling: 12, weekly: 30, monthly: 60, probe: usage }
     # 可选：给该端点的 max_output_tokens 设上限。有些上游（如火山方舟）超过自己的上限时会
     # 回一句不点名参数的 "a parameter specified in the request is not valid"，而客户端常按
     # 上下文窗口的整数倍索要（例如 384000）。设了上限就按上限发，超出部分写日志。
     # 不设（或设 0）= 完全不改这个值。上限按端点配，因为每个上游的天花板不同。
     # max_output_tokens_limit: 131072
+    # 可选：该端点的单价，用于本地记账。不填 = 不记账（不会瞎猜）。
+    # 优先用上游自己返回的 cost；上游不给（DeepSeek 官方、方舟都不给）才用这里的数字。
+    # 币种只是标签，路由器**不做任何汇率换算**：两家的定价不是汇率关系。
+    # 各模型的参考价见 docs/configuration-zh.md 里的对照表。
+    # prices: { currency: USD, input: 0.15, output: 0.60, cached_input: 0.003, peak_multiplier: 2 }
 
   # ---- 阿里百炼 Token Plan / DeepSeek V4.1 Flash ----
   - name: bailian-dsf

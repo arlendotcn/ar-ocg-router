@@ -95,12 +95,50 @@ endpoint from being used as a failure fallback.
 | --- | --- |
 | `quota.unit` | `usd` / `tokens` / `none`. Token-metered plans need no price table. |
 | `quota.probe` | `usage` (provider usage API), `balance` (account balance), `none` (local ledger only). |
-| `quota.rolling` / `weekly` / `monthly` | Window limits in the configured unit. OpenCode Go defaults to 20% / 50% / 100% of a monthly plan. |
+| `quota.rolling` / `weekly` / `monthly` | Window limits in the configured unit. OpenCode Go's built-in default is the **non-promotional** grant: 3 / 7.5 / 15 USD (the 20% / 50% / 100% shape of a $15 month). A promotion raises the grant, not its shape, so write the promotional numbers in the config next to the endpoint — a compiled-in default would silently misreport quota the day a promotion starts or ends. |
 | `quota.refresh_secs` | Probe interval. Default 60s for `usage`, 300s for `balance`. |
 
 When no probe is available the router falls back to a local ledger (cost accumulated from
 token counts divided by the plan limit). That only affects the precision of the off-peak
 "is this quota going to waste" test, never availability.
+
+### Per-token prices, and why there are no "deduction coefficients"
+
+An endpoint may declare what it charges:
+
+```yaml
+prices: { currency: CNY, input: 1, output: 4, cached_input: 0.02, peak_multiplier: 2 }
+```
+
+Priority is **the upstream's own reported cost > these rates > nothing** (no money is recorded
+rather than a guessed one). `currency` is a label: the router never converts, because two
+merchants' prices are not a currency pair and no exchange rate was ever quoted between them.
+
+Providers bill different token classes at different rates, and that is expressed **here**, in the
+three rates — a cached input token costs 0.02 while a fresh one costs 1. The same three rates feed
+the local ledger, so a plan's remaining budget is computed in the same money the provider charges.
+That is why there is no separate set of "deduction coefficients": one price list per endpoint
+already covers cache-hit/cache-miss/output differences, and a plan whose grant is not money is
+expressed with `quota.unit: tokens` instead. A coefficient table would be a second way to say the
+same thing, and the two could disagree.
+
+Reference rates (provider / model → rates), verified on the dates shown:
+
+| Provider | Model | Currency | input | cached_input | output | peak |
+| --- | --- | --- | --- | --- | --- | --- |
+| DeepSeek official | deepseek-flash | CNY | 1 | 0.02 | 4 | ×2 |
+| DeepSeek official | deepseek-v4-pro | CNY | 4.5 | 0.15 | 13.5 | ×2 |
+| OpenCode Go | deepseek-flash | USD | 0.15 | 0.003 | 0.60 | — |
+| OpenCode Go | deepseek-v4-pro | USD | 0.66 | 0.022 | 1.98 | — |
+| OpenCode Go | glm-5.3-flash | USD | 0.15 | 0.015 | 0.50 | — |
+| OpenCode Go | glm-5.3 | USD | 1.40 | 0.26 | 4.40 | — |
+| OpenCode Go | kimi-k3 | USD | 3.00 | 0.30 | 15.00 | — |
+| OpenCode Go | qwen3.8-max | USD | 2.00 | 0.25 | 6.00 | — |
+| Volcengine Ark | (any) | CNY | measure | yours | yourself | — |
+
+DeepSeek's peak windows are Beijing time Mon–Fri 09:00–12:00 and 14:00–18:00, which is exactly the
+UTC `01:00-04:00, 06:00-10:00` in the default `peak_windows`. Ark publishes per-region rates that
+change often and does not report a cost per request, so fill those in from your console.
 
 ## Router policy
 

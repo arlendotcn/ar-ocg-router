@@ -7,11 +7,26 @@ export function fmtNum(n: number | null | undefined, digits = 0): string {
   return n.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
-export function fmtUsd(n: number | null | undefined, digits = 4): string {
+/** Symbols for the currencies the providers actually quote in. Unknown codes fall back to the
+ *  code itself, which is honest: better "12.5 XYZ" than a dollar sign on someone else's currency. */
+const SYMBOLS: Record<string, string> = { USD: "$", CNY: "¥", RMB: "¥", EUR: "€", JPY: "¥" };
+
+export function moneySymbol(currency?: string | null): string {
+  const c = (currency ?? "").trim().toUpperCase();
+  return SYMBOLS[c] ?? (c ? c + " " : "");
+}
+
+/**
+ * Formats an amount in *its own* currency. The number is never converted: the providers quote
+ * different currencies at prices that are not a currency pair (OpenCode Go sells DeepSeek Flash at
+ * $0.15, DeepSeek itself at ¥1), so converting would invent a rate that nobody quoted.
+ */
+export function fmtMoney(n: number | null | undefined, currency?: string | null, digits = 4): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
-  if (n === 0) return "$0";
-  if (Math.abs(n) < 0.0001) return "$" + n.toExponential(2);
-  return "$" + n.toFixed(digits).replace(/0+$/, "").replace(/\.$/, "");
+  const sym = moneySymbol(currency);
+  if (n === 0) return sym + "0";
+  if (Math.abs(n) < 0.0001) return sym + n.toExponential(2);
+  return sym + n.toFixed(digits).replace(/0+$/, "").replace(/\.$/, "");
 }
 
 export function fmtBytes(n: number): string {

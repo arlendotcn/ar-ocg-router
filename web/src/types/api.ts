@@ -21,10 +21,10 @@ export type Quota = {
   weekly: QuotaView;
   monthly: QuotaView;
   local_ledger: {
-    total_usd: number;
-    rolling_usd: number;
-    weekly_usd: number;
-    monthly_usd: number;
+    total: number;
+    rolling: number;
+    weekly: number;
+    monthly: number;
   };
   last_error: string | null;
 };
@@ -37,8 +37,10 @@ export type AccountStats = {
   prompt_tokens: number;
   completion_tokens: number;
   cached_tokens: number;
-  cost_usd: number;
-  saved_usd: number;
+  /** Unit of this endpoint's money. Never converted; a label only. */
+  currency: string;
+  cost: number;
+  saved: number;
   avg_latency_ms: number;
   last_used: string | null;
   last_error: string | null;
@@ -105,7 +107,8 @@ export type Stats = {
     cash_used: number;
     bytes_out: number;
   };
-  savings: { opencodego_saved_usd: number; fallback_spent_usd: number };
+  /** Grouped by currency: adding a dollar figure to a yuan one yields money in no currency. */
+  savings: Record<string, { saved: number; spent: number }>;
   accounts: Account[];
   warnings: string[];
   ui?: { managed: boolean; path_locked: boolean };
@@ -135,6 +138,8 @@ export type EndpointCfg = {
   /** Ceiling for the client's `max_output_tokens`: only requests asking for MORE than this are
    *  rewritten down to it. 0 (or absent) means the value is never touched. */
   max_output_tokens_limit: number;
+  /** What this endpoint charges, in the provider's own currency. All zero = no money recorded. */
+  prices: { currency: string; input: number; output: number; cached_input: number; peak_multiplier: number };
   inject_session: boolean;
   headers: Record<string, string>;
   drop_params: string[];
