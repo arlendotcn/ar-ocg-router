@@ -93,14 +93,62 @@ endpoint from being used as a failure fallback.
 
 | Field | Description |
 | --- | --- |
-| `quota.unit` | `usd` / `tokens` / `none`. Token-metered plans need no price table. |
+| `quota.unit` | `usd` / `rmb` / `tokens` / `none`. Token-metered plans need no price table. |
 | `quota.probe` | `usage` (provider usage API), `balance` (account balance), `none` (local ledger only). |
 | `quota.rolling` / `weekly` / `monthly` | Window limits in the configured unit. OpenCode Go's built-in default is the **non-promotional** grant: 3 / 7.5 / 15 USD (the 20% / 50% / 100% shape of a $15 month). A promotion raises the grant, not its shape, so write the promotional numbers in the config next to the endpoint — a compiled-in default would silently misreport quota the day a promotion starts or ends. |
+| `quota.cycle_day` | The **reset day** (1–31) of a subscription plan, i.e. the day it was bought. Unset or `0` = no reset, and the monthly window is a plain 30-day sliding sum (what pay-as-you-go endpoints want). See below. |
+| `quota.used_percent` + `quota.used_at` | Calibrate the local ledger against the percentage the provider's console shows. See below. |
 | `quota.refresh_secs` | Probe interval. Default 60s for `usage`, 300s for `balance`. |
 
-When no probe is available the router falls back to a local ledger (cost accumulated from
-token counts divided by the plan limit). That only affects the precision of the off-peak
+When no probe is available the router falls back to a local ledger (accumulated cost or tokens
+as a share of the plan limit). That only affects the precision of the off-peak
 "is this quota going to waste" test, never availability.
+
+### Subscription cycles, and why a reset day is needed
+
+A pay-as-you-go account has no cycle: what it spends keeps accumulating. A subscription is
+different - the provider resets the allowance to full at the start of each billing cycle, and the
+reset day is the **day of purchase**. The provider's own rule is "effective the day you buy,
+expiring the next month on the same day at 23:59:59": buy on the 4th and it expires on the 4th;
+buy on Jan 31 and it expires Feb 28 (a month without that day uses its last day).
+
+A 30-day sliding window **cannot express this**. On the day the provider resets, the sliding window
+still holds the entire previous month, so the local percentage starts high and only becomes
+self-consistent a month later.
+
+```yaml
+quota: { unit: rmb, monthly: 200, probe: none, cycle_day: 26 }
+```
+
+With `cycle_day` set, "used this cycle" means everything accumulated since the cycle began. The
+boundary is derived from the anchor day, so the reset instant is **knowable locally** - something a
+sliding window never provided. That is why the console can now show a reset countdown and a
+projection that agree with the provider's own screen.
+
+### Calibration: making the local figure match the console
+
+The router only sees traffic **it forwarded itself**. If the same key is also used by other tools,
+or was already partly spent before the endpoint was configured, the local percentage is bound to
+read low. One calibration closes the gap:
+
+```yaml
+quota: { ..., cycle_day: 26, used_percent: 43.5, used_at: 1767225600 }
+```
+
+This reads "at `used_at`, the provider's console showed 43.5%". Used in the current cycle =
+`43.5% x limit + everything the router forwarded since used_at`.
+
+It is a **percentage** rather than an amount because that is what the console shows: you copy one
+number and the router does the conversion.
+
+`used_at` is not bookkeeping overhead - it is the **bound** on the calibration. Without it the
+percentage would be added to every cycle, inventing usage the provider never recorded. With it, the
+calibration expires on its own when the next cycle starts, which is exactly the wanted behaviour, so
+you never clear it by hand. A percentage supplied without an instant is refused with a warning,
+because it could never expire.
+
+> **Limit**: the figure only stays accurate if this key is used by the router **alone**. Share the key
+> and the difference re-accumulates over time; no configuration can repair that.
 
 ### Per-token prices, and why there are no "deduction coefficients"
 
