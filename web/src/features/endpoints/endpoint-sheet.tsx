@@ -7,6 +7,7 @@ import { Button, Spinner } from "@/components/ui/button";
 import { ChipInput, Field, Input, Select, Switch, Textarea } from "@/components/ui/field";
 import { Sheet } from "@/components/ui/sheet";
 import { copyText } from "@/lib/format";
+import { cn } from "@/lib/utils";
 import { ModelPicker } from "@/components/model-picker";
 import type { EndpointCfg, ModelEntry, TestResult } from "@/types/api";
 
@@ -263,7 +264,12 @@ export function EndpointSheet({
             type="button"
             onClick={() => setAdvanced((v) => !v)}
             aria-expanded={advanced}
-            className="flex w-full items-center justify-between gap-2 border-b border-[var(--line)] px-3 py-2 text-left transition-colors hover:bg-[var(--panel-2)]/50"
+            // The divider belongs to the header only while there is something under it. Collapsed,
+            // it sat on top of the plate's own bottom border and read as a doubled edge.
+            className={cn(
+              "flex w-full items-center justify-between gap-2 px-3 py-2 text-left transition-colors hover:bg-[var(--panel-2)]/50",
+              advanced && "border-b border-[var(--line)]",
+            )}
           >
             <span className="mono text-xs uppercase tracking-[0.16em]">{t.endpoints.advancedTitle}</span>
             <span className="text-2xs text-[var(--ink-faint)]">{advanced ? "▴" : "▾"}</span>
@@ -282,10 +288,12 @@ export function EndpointSheet({
                 as 0 - two spellings of "nothing" in one file is how the wrong one gets read. Zero,
                 empty and unparseable input are all ignored, matching the server side. */}
             <Field label={t.endpoints.maxOutputTokens} help={t.endpoints.maxOutputTokensHint}>
+              {/* No placeholder on purpose. Any number here would read as "the normal value" and
+                  get copied onto endpoints that have no ceiling at all, silently shortening every
+                  long answer. This field is a measured fact about one upstream, not a default. */}
               <Input
                 type="number"
                 min={0}
-                placeholder="131072"
                 value={draft.max_output_tokens_limit > 0 ? draft.max_output_tokens_limit : ""}
                 onChange={(e) => {
                   const n = Math.floor(Number(e.target.value));
