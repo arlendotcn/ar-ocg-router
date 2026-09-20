@@ -279,20 +279,17 @@ export function EndpointSheet({
             </Field>
             {/* A ceiling, not a fixed value: only a request that asks for more is rewritten down
                 to it. Empty means "not set", which is written as the key being absent rather than
-                as 0 - two spellings of "nothing" in one file is how the wrong one gets read. */}
-            <Field
-              label={t.endpoints.maxOutputTokens}
-              help={t.endpoints.maxOutputTokensHint}
-              hint={draft.max_output_tokens_limit > 0 ? t.endpoints.maxOutputTokensActive : undefined}
-            >
+                as 0 - two spellings of "nothing" in one file is how the wrong one gets read. Zero,
+                empty and unparseable input are all ignored, matching the server side. */}
+            <Field label={t.endpoints.maxOutputTokens} help={t.endpoints.maxOutputTokensHint}>
               <Input
                 type="number"
                 min={0}
                 placeholder="131072"
                 value={draft.max_output_tokens_limit > 0 ? draft.max_output_tokens_limit : ""}
                 onChange={(e) => {
-                  const raw = e.target.value.trim();
-                  set("max_output_tokens_limit", raw === "" ? 0 : Math.max(0, Number(raw) || 0));
+                  const n = Math.floor(Number(e.target.value));
+                  set("max_output_tokens_limit", Number.isFinite(n) && n > 0 ? n : 0);
                 }}
               />
             </Field>
