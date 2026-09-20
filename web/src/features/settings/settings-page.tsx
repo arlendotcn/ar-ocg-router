@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Plate, PlateBlock } from "@/components/ui/plate";
 import { PageHeader } from "@/components/page-header";
 import { Field, Input, Select, Textarea } from "@/components/ui/field";
+import { NumberField } from "@/components/ui/number-field";
 import { Sheet } from "@/components/ui/sheet";
 import { copyText, download, fmtAgo } from "@/lib/format";
 import { useStatsStream } from "@/lib/use-stats";
@@ -60,37 +61,47 @@ export function SettingsPage() {
           <Field label={t.settings.host} help={t.settings.hostHint}>
             <Input value={s.host} onChange={(e) => setServer("host", e.target.value)} />
           </Field>
-          <Field label={t.settings.port} help={t.settings.portHint}>
-            <Input type="number" value={s.port} onChange={(e) => setServer("port", Number(e.target.value) || 0)} />
-          </Field>
-          <Field label={t.settings.maxConns} help={t.settings.maxConnsHint}>
-            <Input
-              type="number"
-              value={s.max_connections}
-              onChange={(e) => setServer("max_connections", Number(e.target.value) || 0)}
-            />
-          </Field>
-          <Field label={t.settings.idleTimeout} help={t.settings.idleTimeoutHint}>
-            <Input
-              type="number"
-              value={s.idle_timeout_secs}
-              onChange={(e) => setServer("idle_timeout_secs", Number(e.target.value) || 0)}
-            />
-          </Field>
-          <Field label={t.settings.readTimeout} help={t.settings.readTimeoutHint}>
-            <Input
-              type="number"
-              value={s.read_timeout_secs}
-              onChange={(e) => setServer("read_timeout_secs", Number(e.target.value) || 0)}
-            />
-          </Field>
-          <Field label={t.settings.maxBody} help={t.settings.maxBodyHint}>
-            <Input
-              type="number"
-              value={s.max_body_bytes}
-              onChange={(e) => setServer("max_body_bytes", Number(e.target.value) || 0)}
-            />
-          </Field>
+          {/* Bounds mirror src/config.rs: an out-of-range port is refused there (keeping the old
+              one), the rest are clamped, so letting the form accept them would show a value the
+              router never uses. */}
+          <NumberField
+            label={t.settings.port}
+            help={t.settings.portHint}
+            value={s.port}
+            min={1}
+            max={65535}
+            onChange={(v) => setServer("port", v)}
+          />
+          <NumberField
+            label={t.settings.maxConns}
+            help={t.settings.maxConnsHint}
+            value={s.max_connections}
+            min={1}
+            onChange={(v) => setServer("max_connections", v)}
+          />
+          <NumberField
+            label={t.settings.idleTimeout}
+            help={t.settings.idleTimeoutHint}
+            value={s.idle_timeout_secs}
+            min={1}
+            unit={t.common.seconds}
+            onChange={(v) => setServer("idle_timeout_secs", v)}
+          />
+          <NumberField
+            label={t.settings.readTimeout}
+            help={t.settings.readTimeoutHint}
+            value={s.read_timeout_secs}
+            min={1}
+            unit={t.common.seconds}
+            onChange={(v) => setServer("read_timeout_secs", v)}
+          />
+          <NumberField
+            label={t.settings.maxBody}
+            help={t.settings.maxBodyHint}
+            value={s.max_body_bytes}
+            min={1024}
+            onChange={(v) => setServer("max_body_bytes", v)}
+          />
         </div>
         <div className="border-t border-[var(--line)] px-3 py-3 sm:px-4">
           <Field

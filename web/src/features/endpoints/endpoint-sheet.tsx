@@ -240,6 +240,10 @@ export function EndpointSheet({
               </Select>
             </Field>
           </div>
+          {/* The three windows keep a plain input on purpose: 0 is a real value here ("this window
+              is not measured"), and measures_something() treats it exactly that way - unlike the
+              numeric fields on the policy and settings pages, which the parser clamps and which
+              therefore refuse out-of-range input. */}
           {draft.quota.unit !== "none" ? (
             <div className="grid gap-3 sm:grid-cols-3">
               <Field label={t.endpoints.rolling} help={t.endpoints.limitsHint}>

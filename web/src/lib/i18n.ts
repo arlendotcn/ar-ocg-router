@@ -86,6 +86,8 @@ const zh = {
     required: "必填",
     optional: "可选",
     default: "默认",
+    minValue: "不能小于 {min}{unit}",
+    maxValue: "不能大于 {max}{unit}",
   },
   dash: {
     title: "总览",
@@ -482,6 +484,8 @@ const en: Dict = {
     required: "required",
     optional: "optional",
     default: "default",
+    minValue: "must be at least {min}{unit}",
+    maxValue: "must be at most {max}{unit}",
   },
   dash: {
     title: "Overview",

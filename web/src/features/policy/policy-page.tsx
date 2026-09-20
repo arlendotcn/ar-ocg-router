@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Plate, PlateBlock, Readout } from "@/components/ui/plate";
 import { PageHeader } from "@/components/page-header";
 import { ChipInput, Field, Input, Select, Switch } from "@/components/ui/field";
+import { NumberField } from "@/components/ui/number-field";
 import type { PlanPreview, RouterCfg } from "@/types/api";
 import { fmtDuration } from "@/lib/format";
 import { useStatsStream } from "@/lib/use-stats";
@@ -203,27 +204,29 @@ export function PolicyPage() {
               <option value="fallback">fallback</option>
             </Select>
           </Field>
-          <Field label={t.policy.surplusMaxPct} help={t.policy.surplusMaxPctHint}>
-            <Input
-              type="number"
-              min={0}
-              max={100}
-              value={r.surplus_max_pct}
-              onChange={(e) => set("surplus_max_pct", Number(e.target.value) || 0)}
-            />
-          </Field>
+          {/* The parser clamps percentages to [1, 100]; showing 0 here would display a value the
+              router replaces with 1 on the next load. */}
+          <NumberField
+            label={t.policy.surplusMaxPct}
+            help={t.policy.surplusMaxPctHint}
+            value={r.surplus_max_pct}
+            min={1}
+            max={100}
+            unit="%"
+            onChange={(v) => set("surplus_max_pct", v)}
+          />
           <Field label={t.policy.peakWindows} help={t.policy.peakWindowsHint}>
             <Input value={r.peak_windows} onChange={(e) => set("peak_windows", e.target.value)} />
           </Field>
-          <Field label={t.policy.exhaustAtPct} help={t.policy.exhaustAtPctHint}>
-            <Input
-              type="number"
-              min={0}
-              max={100}
-              value={r.exhaust_at_pct}
-              onChange={(e) => set("exhaust_at_pct", Number(e.target.value) || 0)}
-            />
-          </Field>
+          <NumberField
+            label={t.policy.exhaustAtPct}
+            help={t.policy.exhaustAtPctHint}
+            value={r.exhaust_at_pct}
+            min={1}
+            max={100}
+            unit="%"
+            onChange={(v) => set("exhaust_at_pct", v)}
+          />
         </div>
         <div className="border-t border-[var(--line)] px-3 py-1 sm:px-4">
           <ToggleLine
@@ -255,47 +258,62 @@ export function PolicyPage() {
 
       <PlateBlock title={t.policy.retryTitle}>
         <div className="grid gap-3 px-3 py-3 sm:grid-cols-3 sm:px-4">
-          <Field label={t.policy.cooldown} help={t.policy.cooldownHint}>
-            <Input type="number" value={r.cooldown_secs} onChange={(e) => set("cooldown_secs", Number(e.target.value) || 0)} />
-          </Field>
-          <Field label={t.policy.authCooldown} help={t.policy.authCooldownHint}>
-            <Input
-              type="number"
-              value={r.auth_cooldown_secs}
-              onChange={(e) => set("auth_cooldown_secs", Number(e.target.value) || 0)}
-            />
-          </Field>
-          <Field label={t.policy.serverErrorCooldown} help={t.policy.serverErrorCooldownHint}>
-            <Input
-              type="number"
-              value={r.server_error_cooldown_secs}
-              onChange={(e) => set("server_error_cooldown_secs", Number(e.target.value) || 0)}
-            />
-          </Field>
-          <Field label={t.policy.skipAfterFailures} help={t.policy.skipAfterFailuresHint}>
-            <Input
-              type="number"
-              value={r.skip_after_failures}
-              onChange={(e) => set("skip_after_failures", Number(e.target.value) || 0)}
-            />
-          </Field>
-          <Field label={t.policy.skipSecs} help={t.policy.skipSecsHint}>
-            <Input type="number" value={r.skip_secs} onChange={(e) => set("skip_secs", Number(e.target.value) || 0)} />
-          </Field>
-          <Field label={t.policy.attemptBudget} help={t.policy.attemptBudgetHint}>
-            <Input
-              type="number"
-              value={r.attempt_budget_secs}
-              onChange={(e) => set("attempt_budget_secs", Number(e.target.value) || 0)}
-            />
-          </Field>
-          <Field label={t.policy.quotaRefreshSecs} help={t.policy.quotaRefreshSecsHint}>
-            <Input
-              type="number"
-              value={r.quota_refresh_secs}
-              onChange={(e) => set("quota_refresh_secs", Number(e.target.value) || 0)}
-            />
-          </Field>
+          <NumberField
+            label={t.policy.cooldown}
+            help={t.policy.cooldownHint}
+            value={r.cooldown_secs}
+            min={0}
+            unit={t.common.seconds}
+            onChange={(v) => set("cooldown_secs", v)}
+          />
+          <NumberField
+            label={t.policy.authCooldown}
+            help={t.policy.authCooldownHint}
+            value={r.auth_cooldown_secs}
+            min={0}
+            unit={t.common.seconds}
+            onChange={(v) => set("auth_cooldown_secs", v)}
+          />
+          <NumberField
+            label={t.policy.serverErrorCooldown}
+            help={t.policy.serverErrorCooldownHint}
+            value={r.server_error_cooldown_secs}
+            min={0}
+            unit={t.common.seconds}
+            onChange={(v) => set("server_error_cooldown_secs", v)}
+          />
+          <NumberField
+            label={t.policy.skipAfterFailures}
+            help={t.policy.skipAfterFailuresHint}
+            value={r.skip_after_failures}
+            min={1}
+            max={100}
+            onChange={(v) => set("skip_after_failures", v)}
+          />
+          <NumberField
+            label={t.policy.skipSecs}
+            help={t.policy.skipSecsHint}
+            value={r.skip_secs}
+            min={5}
+            unit={t.common.seconds}
+            onChange={(v) => set("skip_secs", v)}
+          />
+          <NumberField
+            label={t.policy.attemptBudget}
+            help={t.policy.attemptBudgetHint}
+            value={r.attempt_budget_secs}
+            min={5}
+            unit={t.common.seconds}
+            onChange={(v) => set("attempt_budget_secs", v)}
+          />
+          <NumberField
+            label={t.policy.quotaRefreshSecs}
+            help={t.policy.quotaRefreshSecsHint}
+            value={r.quota_refresh_secs}
+            min={5}
+            unit={t.common.seconds}
+            onChange={(v) => set("quota_refresh_secs", v)}
+          />
         </div>
       </PlateBlock>
 
@@ -310,13 +328,14 @@ export function PolicyPage() {
               <option value="per-request">per-request</option>
             </Select>
           </Field>
-          <Field label={t.policy.sessionAffinityTtl} help={t.policy.sessionAffinityTtlHint}>
-            <Input
-              type="number"
-              value={r.session_affinity_ttl_secs}
-              onChange={(e) => set("session_affinity_ttl_secs", Number(e.target.value) || 0)}
-            />
-          </Field>
+          <NumberField
+            label={t.policy.sessionAffinityTtl}
+            help={t.policy.sessionAffinityTtlHint}
+            value={r.session_affinity_ttl_secs}
+            min={0}
+            unit={t.common.seconds}
+            onChange={(v) => set("session_affinity_ttl_secs", v)}
+          />
         </div>
         <div className="space-y-3 border-t border-[var(--line)] px-3 py-3 sm:px-4">
           <Field label={t.policy.sessionHeaders} help={t.policy.sessionHeadersHint}>
