@@ -272,6 +272,25 @@ export function EndpointSheet({
                 onChange={(e) => setQuota("refresh_secs", Number(e.target.value) || 300)}
               />
             </Field>
+            {/* A ceiling, not a fixed value: only a request that asks for more is rewritten down
+                to it. Empty means "not set", which is written as the key being absent rather than
+                as 0 - two spellings of "nothing" in one file is how the wrong one gets read. */}
+            <Field
+              label={t.endpoints.maxOutputTokens}
+              help={t.endpoints.maxOutputTokensHint}
+              hint={draft.max_output_tokens_limit > 0 ? t.endpoints.maxOutputTokensActive : undefined}
+            >
+              <Input
+                type="number"
+                min={0}
+                placeholder="131072"
+                value={draft.max_output_tokens_limit > 0 ? draft.max_output_tokens_limit : ""}
+                onChange={(e) => {
+                  const raw = e.target.value.trim();
+                  set("max_output_tokens_limit", raw === "" ? 0 : Math.max(0, Number(raw) || 0));
+                }}
+              />
+            </Field>
             <Field label={t.endpoints.headers} help={t.endpoints.headersHint}>
               <Textarea
                 rows={3}
@@ -290,6 +309,14 @@ export function EndpointSheet({
             </Field>
             <Field label={t.endpoints.noErrorFallback} help={t.endpoints.noErrorFallbackHint}>
               <SwitchRow checked={draft.no_error_fallback} onChange={(v) => set("no_error_fallback", v)} />
+            </Field>
+            {/* Moved in here: a section of its own that held one button was a heading pretending to
+                be a feature, and calling it "Advanced" next to the real advanced options read as
+                two different things with the same name. */}
+            <Field label={t.endpoints.tools} help={t.endpoints.toolsHint}>
+              <Button size="sm" variant="ghost" onClick={() => doCopy("curl", curlFor())}>
+                {copied === "curl" ? t.endpoints.curlCopied : t.endpoints.copyCurl}
+              </Button>
             </Field>
           </div>
         ) : null}
@@ -356,12 +383,6 @@ export function EndpointSheet({
             )}
           </Section>
         ) : null}
-
-        <Section title={t.common.advanced}>
-          <Button size="sm" variant="ghost" onClick={() => doCopy("curl", curlFor())}>
-            {copied === "curl" ? t.endpoints.curlCopied : t.endpoints.copyCurl}
-          </Button>
-        </Section>
 
         {errors.length > 0 ? (
           <div className="rounded-[2px] border border-[var(--danger)]/50 px-3 py-2 text-xs text-[var(--danger)]">

@@ -198,6 +198,11 @@ fn log_yaml(l: &LogCfg) -> Y {
     if l.quiet {
         m.insert(ystr("quiet"), ybool(true));
     }
+    // Only written when set: this is a debugging switch, and a config file is easier to read when
+    // the rare options are not spelled out at their defaults.
+    if l.dump_error_request {
+        m.insert(ystr("dump_error_request"), ybool(true));
+    }
     Y::Mapping(m)
 }
 

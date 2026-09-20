@@ -2411,3 +2411,107 @@ fn stats_supports_conditional_get_and_still_reports_every_change() {
         200
     );
 }
+
+/// An upstream that rejects an over-large max_output_tokens with a generic error must not make the
+/// endpoint unusable: the per-endpoint ceiling clamps the value, and the request goes through.
+#[test]
+fn an_endpoint_ceiling_clamps_an_oversized_max_output_tokens() {
+    let go = Mock::start();
+    let r = start_router("clamp-limit", "2026-09-16T05:00:00Z", &|port| {
+        format!(
+            r#"server:
+  host: 127.0.0.1
+  port: {port}
+  max_connections: 16
+log:
+  level: debug
+  file: ""
+router:
+  mode: plans
+  peak_windows: "Mon-Fri 01:00-04:00, 06:00-10:00 UTC"
+  idle_prefer: surplus_first
+plans:
+  - name: clamped
+    url: {go}/v1
+    key: k1
+    model: glm-5.3-flash
+    mode: both
+    provider: generic
+    max_output_tokens_limit: 131072
+"#,
+            port = port,
+            go = go.url()
+        )
+    });
+
+    // The client asks for far more than any model can return (384000 = 3 x 128k), which is what a
+    // coding agent does; the endpoint's ceiling must be what reaches the upstream.
+    let body = r#"{"model":"glm-5.3-flash","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":false,"max_output_tokens":384000}"#;
+    let resp = request(r.port, "POST", "/v1/responses", Some(body), &[]);
+    if resp.status != 200 {
+        dump_log(&r);
+    }
+    assert_eq!(resp.status, 200, "body={}", resp.body);
+    let posts = go.posts();
+    let sent = posts.last().expect("the upstream was called");
+    assert_eq!(
+        sent.json()["max_output_tokens"].as_u64(),
+        Some(131072),
+        "the ceiling was not applied: {}",
+        sent.body
+    );
+
+    // A value already inside the ceiling is passed through untouched.
+    let small = r#"{"model":"glm-5.3-flash","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":false,"max_output_tokens":4096}"#;
+    assert_eq!(request(r.port, "POST", "/v1/responses", Some(small), &[]).status, 200);
+    let posts = go.posts();
+    let sent = posts.last().unwrap();
+    assert_eq!(sent.json()["max_output_tokens"].as_u64(), Some(4096));
+
+    // A zero is the documented "not set" spelling and must behave exactly like an absent key,
+    // and a negative one is warned about and ignored rather than becoming a huge unsigned ceiling.
+    let zero = start_router("clamp-zero", "2026-09-16T05:00:00Z", &|port| {
+        config_plans_only(port, &go.url()).replace(
+            "    provider: opencodego",
+            "    provider: opencodego\n    max_output_tokens_limit: 0",
+        )
+    });
+    let resp = request(zero.port, "POST", "/v1/responses", Some(body), &[]);
+    assert_eq!(resp.status, 200, "body={}", resp.body);
+    let posts = go.posts();
+    assert_eq!(
+        posts.last().unwrap().json()["max_output_tokens"].as_u64(),
+        Some(384000),
+        "a zero ceiling must mean \"not set\""
+    );
+
+    let negative = start_router("clamp-negative", "2026-09-16T05:00:00Z", &|port| {
+        config_plans_only(port, &go.url()).replace(
+            "    provider: opencodego",
+            "    provider: opencodego\n    max_output_tokens_limit: -1",
+        )
+    });
+    let resp = request(negative.port, "POST", "/v1/responses", Some(body), &[]);
+    assert_eq!(resp.status, 200, "body={}", resp.body);
+    let posts = go.posts();
+    assert_eq!(
+        posts.last().unwrap().json()["max_output_tokens"].as_u64(),
+        Some(384000),
+        "a negative ceiling must be ignored, never turned into a huge unsigned value"
+    );
+    dump_log(&negative);
+
+    // Without the key there is no clamp at all: the documented default is "do not touch it".
+    let plain = start_router("clamp-absent", "2026-09-16T05:00:00Z", &|port| {
+        config_plans_only(port, &go.url()).replace("glm-5.3-flash", "glm-5.3-flash")
+    });
+    let resp = request(plain.port, "POST", "/v1/responses", Some(body), &[]);
+    assert_eq!(resp.status, 200, "body={}", resp.body);
+    let posts = go.posts();
+    let sent = posts.last().unwrap();
+    assert_eq!(
+        sent.json()["max_output_tokens"].as_u64(),
+        Some(384000),
+        "an endpoint without a ceiling must not silently rewrite the value"
+    );
+}

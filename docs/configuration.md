@@ -61,7 +61,27 @@ fallback:
 | `inject_session` | Send `x-opencode-session`. Required by OpenCode Go. |
 | `headers` | Extra request headers (some bridges require a client fingerprint). |
 | `drop_params` | Body fields this endpoint rejects. |
+| `max_output_tokens_limit` | **A ceiling, not a fixed value.** When the client asks for more than this, the request is sent with this value instead; anything at or below it is passed through untouched. Omitted or `0` means the value is never touched. Set it from a measured upstream limit, not a guess: set too low, it silently shortens every long answer. See below. |
 | `enabled` | `false` removes the endpoint from every candidate list, including failover. See [Routing](routing.md). |
+
+#### `max_output_tokens_limit`
+
+Some upstreams reject the whole request when `max_output_tokens` exceeds their own ceiling, and
+they say so with a generic "a parameter specified in the request is not valid" that **names no
+parameter** — so the failure looks like "this endpoint cannot serve anything" rather than "one
+number is too big". Coding agents make it worse by asking for a multiple of the context window
+(384000, i.e. 3 × 128k), which no model can return.
+
+The ceiling exists for exactly that case, per endpoint because the ceilings differ per upstream
+(DeepSeek accepts 200000; Ark rejects it). Two properties are deliberate:
+
+- **Clamping, not forcing.** A request that asks for 4096 is sent as 4096.
+- **Your fact, not the router's guess.** Fill it in after measuring the upstream once. The router
+  never derives it from the model library or from anywhere else.
+
+Every clamp is logged at INFO as
+`<endpoint>: max_output_tokens 384000 -> 131072 (endpoint limit)`, so the record shows what was
+actually sent.
 
 ### `rule` values
 

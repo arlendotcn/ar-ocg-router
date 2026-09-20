@@ -18,6 +18,7 @@ mod models;
 mod pricing;
 mod proxy;
 mod persist;
+mod redact;
 mod quota;
 mod router;
 mod sse;

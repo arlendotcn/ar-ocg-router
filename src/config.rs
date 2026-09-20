@@ -197,6 +197,15 @@ pub struct AccountCfg {
     pub modes: Vec<Mode>,
     pub rules: Vec<Rule>,
     pub no_error_fallback: bool,
+    /// Upper bound for the client's `max_output_tokens`, enforced per endpoint.
+    ///
+    /// Some upstreams reject the whole request with a generic "a parameter is not valid" when the
+    /// value is above their own ceiling, and clients routinely ask for far more than any model can
+    /// return (a coding agent asking for 384000 tokens, i.e. 3 x its context window). Clamping is
+    /// lossless - the client asked for "at most this much", and a smaller ceiling still satisfies
+    /// that - and it is per endpoint because the ceilings differ per upstream.
+    /// 0 means "do not touch the value".
+    pub max_output_tokens_limit: u64,
     pub drop_params: Vec<String>,
     pub extra_headers: Vec<(String, String)>,
     pub quota: QuotaCfg,
@@ -334,6 +343,11 @@ pub struct LogCfg {
     pub level: String,
     pub file: Option<String>,
     pub quiet: bool,
+    /// Debugging aid: when an upstream rejects a request with 4xx, log the *shape* of the request
+    /// body we sent (field names, value kinds and the numeric parameters, never the prompt text).
+    /// Off by default - it exists because some upstreams answer "a parameter is not valid" without
+    /// naming the parameter, and the body is the only place the answer can come from.
+    pub dump_error_request: bool,
 }
 
 impl Default for LogCfg {
@@ -342,6 +356,7 @@ impl Default for LogCfg {
             level: "info".to_string(),
             file: None,
             quiet: false,
+            dump_error_request: false,
         }
     }
 }
@@ -760,6 +775,9 @@ pub fn parse(raw: &str, path: &Path) -> Result<Config, String> {
         if let Some(v) = yget(m, "quiet") {
             log.quiet = ybool(v, false);
         }
+        if let Some(v) = yget_any(m, &["dump_error_request", "dump_request_on_4xx"]) {
+            log.dump_error_request = ybool(v, false);
+        }
     }
 
     if let Some(m) = yget(root, "router").and_then(ymap) {
@@ -984,6 +1002,18 @@ pub fn parse(raw: &str, path: &Path) -> Result<Config, String> {
 
             let mut rules: Vec<Rule> = Vec::new();
             let mut no_error_fallback = false;
+            let mut max_output_tokens_limit: u64 = 0;
+            // One spelling only. "max_output_tokens" would be a guess at a name nothing writes,
+            // and a wasted guess here is not harmless: a hand-written key of that name would be
+            // silently read as a clamp ceiling and start rewriting requests.
+            if let Some(v) = yget(m, "max_output_tokens_limit") {
+                let n = yint(v, 0);
+                if n > 0 {
+                    max_output_tokens_limit = n as u64;
+                } else if n < 0 {
+                    warnings.push(format!("{}[{}].max_output_tokens_limit {} is negative, ignored", key, idx, n));
+                }
+            }
             if let Some(v) = yget_any(m, &["rule", "rules", "when"]) {
                 for tok in ytokens(v) {
                     let t = tok.trim().to_ascii_lowercase().replace('-', "_");
@@ -1185,6 +1215,7 @@ pub fn parse(raw: &str, path: &Path) -> Result<Config, String> {
                 modes,
                 rules,
                 no_error_fallback,
+                max_output_tokens_limit,
                 drop_params,
                 extra_headers,
                 quota,

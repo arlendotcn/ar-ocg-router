@@ -27,6 +27,7 @@ const BLANK: EndpointCfg = {
   modes: ["both"],
   rules: ["always"],
   no_error_fallback: false,
+  max_output_tokens_limit: 0,
   inject_session: false,
   headers: {},
   drop_params: [],

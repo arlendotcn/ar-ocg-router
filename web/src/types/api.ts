@@ -132,6 +132,9 @@ export type EndpointCfg = {
   modes: string[];
   rules: string[];
   no_error_fallback: boolean;
+  /** Ceiling for the client's `max_output_tokens`: only requests asking for MORE than this are
+   *  rewritten down to it. 0 (or absent) means the value is never touched. */
+  max_output_tokens_limit: number;
   inject_session: boolean;
   headers: Record<string, string>;
   drop_params: string[];

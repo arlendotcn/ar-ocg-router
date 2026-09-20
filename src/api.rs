@@ -203,6 +203,7 @@ fn account_cfg_json(a: &AccountCfg) -> Value {
         "modes": modes_json(&a.modes),
         "rules": a.rules.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
         "no_error_fallback": a.no_error_fallback,
+        "max_output_tokens_limit": a.max_output_tokens_limit,
         "inject_session": a.inject_session,
         "headers": Value::Object(headers),
         "drop_params": a.drop_params,
@@ -351,6 +352,11 @@ fn doc_to_yaml(doc: &Value, existing: &Config) -> Result<String, String> {
     let logfile = str_at(log, "file").unwrap_or("");
     if !logfile.trim().is_empty() {
         out.push_str(&format!("  file: {}\n", yaml_str(logfile)));
+    }
+    // The console has no control for this debugging switch, so it must carry the live value through
+    // a save: reading it from the document alone would silently switch it off on the next edit.
+    if bool_at(log, "dump_error_request").unwrap_or(existing.log.dump_error_request) {
+        out.push_str("  dump_error_request: true\n");
     }
 
     out.push_str("\nrouter:\n");
@@ -517,6 +523,16 @@ fn endpoint_yaml(
     }
     if bool_at(e, "inject_session").unwrap_or(false) {
         s.push_str("inject_session: true\n");
+        s.push_str(cont);
+    }
+    // Only written when set: it is an upstream-ceiling workaround, not part of every endpoint.
+    // A save from a console that has no field for it must not drop it, hence the live fallback.
+    let limit = e
+        .get("max_output_tokens_limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or_else(|| old.get(name.as_str()).map(|a| a.max_output_tokens_limit).unwrap_or(0));
+    if limit > 0 {
+        s.push_str(&format!("max_output_tokens_limit: {}\n", limit));
         s.push_str(cont);
     }
     let q = e.get("quota").cloned().unwrap_or(Value::Null);

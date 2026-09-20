@@ -28,6 +28,11 @@ server:
 log:
   level: info
   file: ""
+  # Debugging aid: when an upstream rejects a request with a 4xx, also log the *shape* of the
+  # request body we sent (field names, value kinds, numeric parameters verbatim; text is reduced to
+  # "<str:N>"). Some upstreams answer "a parameter specified in the request is not valid" and do not
+  # say which one - this is the only way to find out. Leave it off unless you are chasing that.
+  # dump_error_request: false
 
 router:
   mode: auto                 # auto | plans | fallback
@@ -77,6 +82,11 @@ plans:
     order: 10
     inject_session: true                      # Go 要求 x-opencode-session，显式开启
     quota: { unit: usd, rolling: 12, weekly: 30, monthly: 60, probe: usage }
+    # 可选：给该端点的 max_output_tokens 设上限。有些上游（如火山方舟）超过自己的上限时会
+    # 回一句不点名参数的 "a parameter specified in the request is not valid"，而客户端常按
+    # 上下文窗口的整数倍索要（例如 384000）。设了上限就按上限发，超出部分写日志。
+    # 不设（或设 0）= 完全不改这个值。上限按端点配，因为每个上游的天花板不同。
+    # max_output_tokens_limit: 131072
 
   # ---- 阿里百炼 Token Plan / DeepSeek V4.1 Flash ----
   - name: bailian-dsf

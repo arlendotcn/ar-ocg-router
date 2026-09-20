@@ -424,6 +424,12 @@ fn client_session(cfg: &Config, req: &Request, body: Option<&Value>) -> Option<S
     None
 }
 
+/// What a clamp changed, for the log line.
+pub struct Clamped {
+    pub from: u64,
+    pub to: u64,
+}
+
 fn apply_compat(
     cfg: &Config,
     acc: &Account,
@@ -431,7 +437,8 @@ fn apply_compat(
     body: &Value,
     upstream_model: &str,
     streaming: bool,
-) -> Value {
+) -> (Value, Option<Clamped>) {
+    let mut clamped: Option<Clamped> = None;
     let mut v = body.clone();
     if let Some(obj) = v.as_object_mut() {
         obj.insert("model".to_string(), json!(upstream_model));
@@ -456,6 +463,18 @@ fn apply_compat(
                 }
             }
         }
+        // Clamp before anything else looks at the body: an upstream that rejects an oversized
+        // value does it with a generic error that names no parameter, so this is the difference
+        // between "the endpoint is unusable" and "the endpoint served the request".
+        if acc.cfg.max_output_tokens_limit > 0 {
+            let limit = acc.cfg.max_output_tokens_limit;
+            if let Some(v) = obj.get("max_output_tokens").and_then(|x| x.as_u64()) {
+                if v > limit {
+                    obj.insert("max_output_tokens".to_string(), json!(limit));
+                    clamped = Some(Clamped { from: v, to: limit });
+                }
+            }
+        }
         if cfg.router.inject_stream_usage && streaming && endpoint == Endpoint::Chat {
             let so = obj
                 .entry("stream_options".to_string())
@@ -465,7 +484,7 @@ fn apply_compat(
             }
         }
     }
-    v
+    (v, clamped)
 }
 
 fn looks_like_model_error(body: &Value) -> bool {
@@ -715,17 +734,26 @@ fn proxy(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
         let upstream_model = acc.cfg.model.clone();
 
         let url = acc.cfg.upstream_url(&req.path);
-        let body_bytes = match &body_json {
-            Some(b) => serde_json::to_vec(&apply_compat(
-                &cfg,
-                acc,
-                endpoint,
-                b,
-                &upstream_model,
-                streaming,
-            ))
-            .unwrap_or_else(|_| req.body.clone()),
-            None => req.body.clone(),
+        // Keep the rewritten document around as well as its bytes: if the upstream rejects the
+        // request with a bad-parameter error, this is the only record of what was actually sent.
+        let mut clamped: Option<Clamped> = None;
+        let sent_json: Option<Value> = body_json.as_ref().map(|b| {
+            let (v, c) = apply_compat(&cfg, acc, endpoint, b, &upstream_model, streaming);
+            clamped = c;
+            v
+        });
+        if let Some(c) = clamped {
+            log_info!(
+                "[{}] {}: max_output_tokens {} -> {} (endpoint limit)",
+                req_id,
+                acc.name(),
+                c.from,
+                c.to
+            );
+        }
+        let body_bytes = match (&sent_json, &body_json) {
+            (Some(v), _) => serde_json::to_vec(v).unwrap_or_else(|_| req.body.clone()),
+            (None, _) => req.body.clone(),
         };
 
         let mut call = state
@@ -826,6 +854,7 @@ fn proxy(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
                     now,
                     &mut attempts,
                     &req_id,
+                    sent_json.as_ref(),
                 ) == ErrorAction::Return
                 {
                     return;
@@ -846,6 +875,7 @@ fn proxy(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
                     now,
                     &mut attempts,
                     &req_id,
+                    sent_json.as_ref(),
                 ) == ErrorAction::Return
                 {
                     return;
@@ -919,6 +949,7 @@ fn handle_upstream_error(
     now: i64,
     attempts: &mut Vec<Attempt>,
     req_id: &str,
+    sent_body: Option<&Value>,
 ) -> ErrorAction {
     let cfg = state.cfg();
     let brief = crate::sse::brief(parsed);
@@ -951,6 +982,16 @@ fn handle_upstream_error(
         status,
         util::truncate(&brief, 220)
     );
+    // Some upstreams reject a request with "a parameter specified in the request is not valid" and
+    // an empty "param": the only way to find out which one is to look at what we sent. Off by
+    // default; the shape report keeps prompts out of the log (see crate::redact).
+    if cfg.log.dump_error_request && (400..500).contains(&status) {
+        if let Some(sent) = sent_body {
+            let (keys, shape) = crate::redact::describe_for_log(sent);
+            log_warn!("[{}] request fields: {}", req_id, keys);
+            log_warn!("[{}] request shape: {}", req_id, util::truncate(&shape, 4000));
+        }
+    }
     attempts.push(Attempt {
         account: acc.name().to_string(),
         status,
