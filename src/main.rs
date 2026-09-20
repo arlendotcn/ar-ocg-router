@@ -305,6 +305,7 @@ fn main() {
         // Counters shown by the console cover the lifetime of the install, not of this process:
         // a restart continues from the file instead of dropping back to zero.
         persist::restore_counters(&state, saved.counters.unwrap_or_default());
+        persist::restore_stats_since(&state, saved.stats_since);
         state.router.health.restore(saved.health);
         state.registry.restore_stats(&saved.stats);
         state.registry.restore_ledgers(&saved.ledgers);

@@ -164,6 +164,10 @@ fn reset_stats(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
     // Discarding it here is exact, not an approximation: concurrent traffic cannot have incremented
     // the counter between the reset above and this store.
     state.statics.requests.store(0, std::sync::atomic::Ordering::Relaxed);
+    // The statistics window restarts here, so the epoch moves with the counters. Without this the
+    // console would show a fresh zero beside the old start date and describe a period that never
+    // existed.
+    crate::persist::reset_stats_since(state, crate::util::now_secs());
     // Write now, not on the next 5s tick: the console refreshes immediately after this returns, and
     // a crash before the flush would otherwise bring the old totals back.
     crate::persist::write(state);

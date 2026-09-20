@@ -89,6 +89,13 @@ export type Stats = {
     version: string;
     pid: number;
     uptime_secs: number;
+    /**
+     * When the counters below started accumulating. `uptime_secs` is only this process, while the
+     * counters are lifetime totals that survive restarts, so without this the two read as one
+     * period. `iso`/`secs` are null when the start is genuinely unknown (a state file written
+     * before this field existed) - render that as unknown, never as "now".
+     */
+    stats_since: { at: number; iso: string | null; secs: number | null };
     now: string;
     fake_now: boolean;
     peak: boolean;

@@ -41,6 +41,12 @@ pub struct AppState {
     pub probe_agent: ureq::Agent,
     pub started_at: i64,
     pub statics: Statics,
+    /// When the statistics counters started accumulating, as unix seconds. Zero = unknown.
+    ///
+    /// Held next to the counters rather than derived, because every other timestamp in reach means
+    /// something else: `started_at` is this process, and the state file's `updated_at` is the last
+    /// flush. Both would misreport a lifetime total as a recent one.
+    pub stats_since: std::sync::atomic::AtomicI64,
     pub process_session: String,
 }
 
@@ -58,6 +64,9 @@ impl AppState {
             probe_agent: crate::httpclient::agent(10, 20, 20),
             started_at: util::now_secs(),
             statics: Statics::default(),
+            // Set properly at startup by persist::restore_stats_since; a fresh process that never
+            // restores anything begins counting now.
+            stats_since: std::sync::atomic::AtomicI64::new(util::now_secs()),
             process_session: util::gen_session_id(),
         })
     }
@@ -339,11 +348,19 @@ fn stats_json(state: &Arc<AppState>) -> Value {
             })
             .collect(),
     );
+    let since = state.stats_since.load(Ordering::Relaxed);
     json!({
         "router": {
             "version": VERSION,
             "pid": std::process::id(),
             "uptime_secs": now - state.started_at,
+            // The window the counters describe. Null, not a guess, when the state file predates
+            // this field: the totals are real but their start is genuinely unknown.
+            "stats_since": {
+                "at": since,
+                "iso": if since > 0 { Value::String(timeutil::iso8601(since)) } else { Value::Null },
+                "secs": if since > 0 { json!((now - since).max(0)) } else { Value::Null },
+            },
             "now": timeutil::iso8601(now),
             "fake_now": util::has_fake_now(),
             "peak": sched.is_peak,

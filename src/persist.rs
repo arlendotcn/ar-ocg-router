@@ -42,6 +42,14 @@ pub struct Persisted {
     pub ledgers: HashMap<String, crate::state::LocalLedger>,
     /// Process-wide counters (requests / streams / retries / bytes).
     pub counters: Option<crate::httpd::StaticsSnapshot>,
+    /// When the statistics counters started accumulating (unix seconds).
+    ///
+    /// The counters are lifetime totals that survive restarts, while the uptime shown next to them
+    /// is only this process's. Without an epoch the two read as if they described one period, and
+    /// 100k requests beside "up 20 minutes" invites exactly the wrong conclusion. Zero means the
+    /// file predates this field, so the start is genuinely unknown and must be reported as such
+    /// rather than guessed as "now".
+    pub stats_since: i64,
 }
 
 /// Load persisted state. Returns an empty value on any problem (and quarantines the file).
@@ -89,7 +97,8 @@ pub fn load(path: &Path) -> Persisted {
         let counters = v
             .get("counters")
             .and_then(crate::httpd::StaticsSnapshot::from_json);
-        Some(Persisted { health, stats, ledgers, counters })
+        let stats_since = v.get("stats_since").and_then(|x| x.as_i64()).unwrap_or(0);
+        Some(Persisted { health, stats, ledgers, counters, stats_since })
     };
     match parse(&text) {
         Some(p) => {
@@ -159,6 +168,14 @@ pub fn save(path: &Path, data: &Persisted, now: i64) -> Result<(), String> {
         "counters".to_string(),
         data.counters.map(|c| c.to_json()).unwrap_or(Value::Null),
     );
+    obj.insert(
+        "stats_since".to_string(),
+        if data.stats_since > 0 {
+            json!(data.stats_since)
+        } else {
+            Value::Null
+        },
+    );
 
     let text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
     let tmp = path.with_extension("json.tmp");
@@ -190,6 +207,7 @@ pub fn snapshot(state: &Arc<crate::proxy::AppState>) -> Persisted {
         } else {
             Some(counters)
         },
+        stats_since: state.stats_since.load(Ordering::Relaxed),
     }
 }
 
@@ -202,6 +220,25 @@ pub fn restore_counters(state: &Arc<crate::proxy::AppState>, totals: crate::http
 /// Zero the process-wide counters. The caller must checkpoint immediately afterwards.
 pub fn reset_counters(state: &Arc<crate::proxy::AppState>) {
     state.statics.reset();
+}
+
+/// Adopt the statistics epoch from the state file.
+///
+/// An older file has no epoch. Carrying the current time forward would claim the existing totals
+/// started now, which is a fabricated answer to the exact question the field exists to answer; so
+/// the unknown is preserved and the console reports it as unknown.
+pub fn restore_stats_since(state: &Arc<crate::proxy::AppState>, since: i64) {
+    state
+        .stats_since
+        .store(since, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Restart the statistics window: counters zeroed, the epoch moves to now. The caller must
+/// checkpoint immediately afterwards.
+pub fn reset_stats_since(state: &Arc<crate::proxy::AppState>, now: i64) {
+    state
+        .stats_since
+        .store(now, std::sync::atomic::Ordering::Relaxed);
 }
 
 static DIRTY: AtomicBool = AtomicBool::new(false);
@@ -297,9 +334,11 @@ mod tests {
             cold_starts: 2,
             retries: 1,
         });
+        data.stats_since = 1_600;
         save(&path, &data, 1700).unwrap();
 
         let back = load(&path);
+        assert_eq!(back.stats_since, 1_600, "the statistics epoch must survive a restart");
         let h = &back.health["a"];
         assert_eq!(h.streak, 2);
         assert_eq!(h.skip_until, 1234);
@@ -336,6 +375,9 @@ mod tests {
         assert_eq!(data.health["a"].streak, 1);
         assert!(data.stats.is_empty());
         assert!(data.counters.is_none());
+        // An older file carries no epoch. Reporting "now" would claim the surviving totals started
+        // now, which is the one answer the field exists to avoid; unknown stays unknown.
+        assert_eq!(data.stats_since, 0, "an absent epoch must not be invented");
         // the file is intact, not quarantined
         assert!(!dir.join("ar-ocg-router.state.json.corrupt").exists());
         let _ = std::fs::remove_dir_all(&dir);

@@ -139,6 +139,20 @@ export function DashboardPage() {
         }
         actions={
           <>
+            {/* The window the counters describe, stated where they are acted on. Uptime is the
+                process; these totals outlive it, so showing them side by side without this would
+                invite reading a lifetime figure as a recent one. Null = the state file predates the
+                field, and "unknown" is the honest answer. */}
+            <span className="mono text-2xs text-[var(--ink-faint)]" title={t.dash.statsSinceHint}>
+              {t.dash.statsSince}{" "}
+              {r.stats_since?.secs != null && r.stats_since.iso ? (
+                <>
+                  {fmtWhen(r.stats_since.iso, lang)} · {fmtDuration(r.stats_since.secs, lang)}
+                </>
+              ) : (
+                t.dash.statsSinceUnknown
+              )}
+            </span>
             {/* Reset sits next to the switch but is not another way to refresh: it destroys data.
                 Armed state carries the warning colour so it cannot be mistaken for the normal button. */}
             {resetArmed ? (
