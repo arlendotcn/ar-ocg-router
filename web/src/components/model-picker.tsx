@@ -150,7 +150,7 @@ export function ModelPicker({
                       setOpen(false);
                     }}
                     className={cn(
-                      "flex w-full items-center gap-2 border-b border-[var(--line)] px-3 py-2 text-left transition-colors last:border-b-0 hover:bg-[var(--panel)]",
+                      "flex w-full items-center gap-2 border-b border-[var(--line)] px-3 py-2 text-left transition-colors last:border-b-0 hover:bg-[var(--signal)]/15",
                       isCurrent && "bg-[var(--signal)]/10",
                     )}
                   >

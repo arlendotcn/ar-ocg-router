@@ -544,7 +544,10 @@ function AccountRow({
         className={cn(
           "group/row flex items-center transition-colors",
           !enabled && "opacity-60",
-          dragging ? "bg-[var(--panel-2)]" : "hover:bg-[var(--panel-2)]",
+          // The row highlight and the drag handle's own hover use the same fill on purpose: the
+          // handle is the row's grip, so hovering it should light the row, not a 24px island inside
+          // it. A darker/lighter handle fill here would look like a separate control.
+          dragging ? "bg-[var(--signal)]/20" : "hover:bg-[var(--signal)]/15",
         )}
       >
         {/* Drag handle: pointer-draggable on touch and mouse, and arrow keys on the keyboard. */}
@@ -552,7 +555,7 @@ function AccountRow({
           type="button"
           aria-label={dragLabel}
           title={dragLabel}
-          className="mono ml-1 flex h-7 w-6 shrink-0 cursor-grab touch-none select-none items-center justify-center rounded-[2px] text-[var(--ink-faint)] transition-colors hover:bg-[var(--panel-2)] hover:text-[var(--ink-dim)] active:cursor-grabbing"
+          className="mono ml-1 flex h-7 w-6 shrink-0 cursor-grab touch-none select-none items-center justify-center rounded-[2px] text-[var(--ink-faint)] transition-colors hover:text-[var(--signal)] active:cursor-grabbing"
           onPointerDown={onDragStart}
           onPointerMove={onDragMove}
           onPointerUp={onDragEnd}

@@ -129,7 +129,7 @@ function TopBar({ theme, setTheme }: { theme: Theme; setTheme: (t: Theme) => voi
               type="button"
               onClick={() => setLang("zh")}
               aria-pressed={lang === "zh"}
-              className={cn("px-1.5 py-1 text-2xs uppercase tracking-wider transition-colors", lang === "zh" ? "text-[var(--signal)]" : "text-[var(--ink-faint)] hover:text-[var(--ink)]")}
+              className={cn("px-1.5 py-1 text-2xs uppercase tracking-wider transition-colors", lang === "zh" ? "text-[var(--signal)]" : "text-[var(--ink-faint)] hover:text-[var(--signal)]")}
             >
               中
             </button>
@@ -138,7 +138,7 @@ function TopBar({ theme, setTheme }: { theme: Theme; setTheme: (t: Theme) => voi
               type="button"
               onClick={() => setLang("en")}
               aria-pressed={lang === "en"}
-              className={cn("px-1.5 py-1 text-2xs uppercase tracking-wider transition-colors", lang === "en" ? "text-[var(--signal)]" : "text-[var(--ink-faint)] hover:text-[var(--ink)]")}
+              className={cn("px-1.5 py-1 text-2xs uppercase tracking-wider transition-colors", lang === "en" ? "text-[var(--signal)]" : "text-[var(--ink-faint)] hover:text-[var(--signal)]")}
             >
               EN
             </button>

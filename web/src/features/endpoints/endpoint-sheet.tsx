@@ -327,7 +327,7 @@ export function EndpointSheet({
             // The divider belongs to the header only while there is something under it. Collapsed,
             // it sat on top of the plate's own bottom border and read as a doubled edge.
             className={cn(
-              "flex w-full items-center justify-between gap-2 px-3 py-2 text-left transition-colors hover:bg-[var(--panel-2)]/50",
+              "flex w-full items-center justify-between gap-2 px-3 py-2 text-left transition-colors hover:bg-[var(--signal)]/15",
               advanced && "border-b border-[var(--line)]",
             )}
           >

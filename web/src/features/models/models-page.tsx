@@ -168,7 +168,7 @@ export function ModelsPage() {
               "mono h-8 rounded-[2px] border px-2 text-2xs uppercase leading-none tracking-wider transition-colors",
               tagFilter === null
                 ? "border-[var(--signal)] bg-[var(--signal)]/15 text-[var(--signal)]"
-                : "border-[var(--line-strong)] text-[var(--ink-faint)] hover:text-[var(--ink)]",
+                : "border-[var(--line-strong)] text-[var(--ink-faint)] hover:text-[var(--signal)]",
             )}
           >
             {t.library.all}
@@ -182,7 +182,7 @@ export function ModelsPage() {
                 "mono h-8 rounded-[2px] border px-2 text-2xs uppercase leading-none tracking-wider transition-colors",
                 tagFilter === tag
                   ? "border-[var(--signal)] bg-[var(--signal)]/15 text-[var(--signal)]"
-                  : "border-[var(--line-strong)] text-[var(--ink-faint)] hover:text-[var(--ink)]",
+                  : "border-[var(--line-strong)] text-[var(--ink-faint)] hover:text-[var(--signal)]",
               )}
             >
               {tag}

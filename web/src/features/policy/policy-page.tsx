@@ -172,7 +172,7 @@ export function PolicyPage() {
               <button
                 type="button"
                 onClick={() => void runPreview(previewKind)}
-                className="mono text-2xs uppercase tracking-[0.12em] text-[var(--ink-faint)] underline transition-colors hover:text-[var(--ink)]"
+                className="mono text-2xs uppercase tracking-[0.12em] text-[var(--ink-faint)] underline transition-colors hover:text-[var(--signal)]"
               >
                 {previewLoading ? t.policy.previewLoading : t.policy.previewRun}
               </button>

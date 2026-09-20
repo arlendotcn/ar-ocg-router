@@ -110,7 +110,10 @@ export function ConfirmButton({
           "mono inline-flex shrink-0 items-center whitespace-nowrap rounded-[2px] border transition-colors",
           open
             ? "border-[var(--danger)] bg-[var(--danger)]/12 text-[var(--danger)]"
-            : "border-transparent text-[var(--ink-dim)] hover:bg-[var(--danger)]/10 hover:text-[var(--danger)]",
+            // A destructive trigger: it hovers into its own colour (red label, faint red fill)
+            // rather than the neutral accent. The row's other actions are neutral buttons, but
+            // this one deletes something, and that meaning must not change under the pointer.
+            : "border-transparent text-[var(--ink-dim)] hover:bg-[var(--danger)]/12 hover:text-[var(--danger)]",
           "disabled:cursor-not-allowed disabled:opacity-40",
           className,
         )}
@@ -139,7 +142,7 @@ export function ConfirmButton({
               ref={cancelRef}
               type="button"
               onClick={() => setOpen(false)}
-              className="mono h-7 rounded-[2px] px-2.5 text-xs uppercase tracking-wide text-[var(--ink-faint)] transition-colors hover:text-[var(--ink)]"
+              className="mono h-7 rounded-[2px] px-2.5 text-xs uppercase tracking-wide text-[var(--ink-faint)] transition-colors hover:bg-[var(--signal)]/15 hover:text-[var(--signal)]"
             >
               {t.common.cancel}
             </button>

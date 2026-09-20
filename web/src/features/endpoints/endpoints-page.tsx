@@ -318,7 +318,7 @@ function SideList({
                     type="button"
                     aria-label={t.endpoints.dragHandle}
                     title={t.endpoints.dragHandle}
-                    className="mono flex h-7 w-6 shrink-0 cursor-grab touch-none select-none items-center justify-center rounded-[2px] text-[var(--ink-faint)] transition-colors hover:bg-[var(--panel-2)] hover:text-[var(--ink-dim)] active:cursor-grabbing"
+                    className="mono flex h-7 w-6 shrink-0 cursor-grab touch-none select-none items-center justify-center rounded-[2px] text-[var(--ink-faint)] transition-colors hover:bg-[var(--signal)]/15 hover:text-[var(--ink-dim)] active:cursor-grabbing"
                     onPointerDown={startDrag(k)}
                     onPointerMove={moveDrag}
                     onPointerUp={endDrag}
