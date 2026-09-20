@@ -79,8 +79,6 @@ const zh = {
     today: "今天",
     kebab: "操作",
     advanced: "高级选项",
-    showAdvanced: "展开高级选项",
-    hideAdvanced: "收起高级选项",
     dirtyReload: "配置已被外部修改，重新加载以查看最新内容",
   },
   field: {
@@ -205,6 +203,7 @@ const zh = {
     curlCopied: "curl 示例已复制",
     urlCopied: "地址已复制",
     testTitle: "连通性自检",
+    advancedTitle: "高级选项",
     testHint: "真实访问上游：密钥、/models、额度/余额，以及一次最小请求。会产生极少量 token 费用。",
     testDraftHint: "按当前表单内容自检，不需要先保存：改了 URL 或密钥后可以直接测。会产生极少量 token 费用。",
     testRunning: "正在探测上游…",
@@ -477,8 +476,6 @@ const en: Dict = {
     today: "today",
     kebab: "Actions",
     advanced: "Advanced",
-    showAdvanced: "Show advanced options",
-    hideAdvanced: "Hide advanced options",
     dirtyReload: "The config changed on disk — reload to see the latest version",
   },
   field: {
@@ -603,6 +600,7 @@ const en: Dict = {
     curlCopied: "curl example copied",
     urlCopied: "URL copied",
     testTitle: "Connectivity self-test",
+    advancedTitle: "Advanced options",
     testHint: "Hits the real upstream: key, /models, quota or balance, and one minimal request. Costs a few tokens.",
     testDraftHint: "Tests what the form currently holds, no save needed: change the URL or key and probe straight away. Costs a few tokens.",
     testRunning: "Probing the upstream…",

@@ -255,17 +255,21 @@ export function EndpointSheet({
         </Section>
 
         {/* ---------- advanced ---------- */}
-        <button
-          type="button"
-          onClick={() => setAdvanced((v) => !v)}
-          className="mono flex w-full items-center gap-2 py-1 text-xs uppercase tracking-[0.14em] text-[var(--ink-faint)] transition-colors hover:text-[var(--ink)]"
-        >
-          <span>{advanced ? t.common.hideAdvanced : t.common.showAdvanced}</span>
-          <span className="text-2xs">{advanced ? "▴" : "▾"}</span>
-        </button>
-
-        {advanced ? (
-          <div className="rise space-y-3 border border-[var(--line)] bg-[var(--panel-2)] p-3">
+        {/* Same plate as every other section, just collapsible: the fields inside are part of the
+            saved endpoint, so they belong in a container that looks like the rest, not in a bare
+            box hanging under a text link. */}
+        <section className="plate">
+          <button
+            type="button"
+            onClick={() => setAdvanced((v) => !v)}
+            aria-expanded={advanced}
+            className="flex w-full items-center justify-between gap-2 border-b border-[var(--line)] px-3 py-2 text-left transition-colors hover:bg-[var(--panel-2)]/50"
+          >
+            <span className="mono text-xs uppercase tracking-[0.16em]">{t.endpoints.advancedTitle}</span>
+            <span className="text-2xs text-[var(--ink-faint)]">{advanced ? "▴" : "▾"}</span>
+          </button>
+          {advanced ? (
+            <div className="rise space-y-3 px-3 py-3">
             <Field label={t.endpoints.quotaTitle + " · " + t.endpoints.refreshSecs} help={t.endpoints.refreshSecsHint}>
               <Input
                 type="number"
@@ -319,8 +323,9 @@ export function EndpointSheet({
                 {copied === "curl" ? t.endpoints.curlCopied : t.endpoints.copyCurl}
               </Button>
             </Field>
-          </div>
-        ) : null}
+            </div>
+          ) : null}
+        </section>
 
         {/* ---------- live test ---------- */}
         {endpoint && endpoint.name ? (
