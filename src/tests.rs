@@ -497,6 +497,211 @@ fn an_empty_money_window_is_not_negative_zero() {
     }
 }
 
+// ------------------------------------------------------------------ billing cycles
+
+/// The provider's own examples: bought on the 4th -> next month on the 4th; bought on Jan 31 ->
+/// Feb 28 in a non-leap year. A month too short for the anchor uses its last day.
+#[test]
+fn a_cycle_boundary_follows_the_providers_own_examples() {
+    let at = |s: &str| timeutil::parse_iso8601(s).unwrap();
+
+    // Bought Jan 4: the cycle containing Jan 20 runs Jan 4 -> Feb 4.
+    let (s, e) = timeutil::cycle_bounds(at("2026-01-20T00:00:00Z"), 4);
+    assert_eq!(s, at("2026-01-04T00:00:00Z"));
+    assert_eq!(e, at("2026-02-04T00:00:00Z"));
+
+    // The boundary itself belongs to the new cycle, so the reset is not a day late.
+    let (s, e) = timeutil::cycle_bounds(at("2026-02-04T00:00:00Z"), 4);
+    assert_eq!(s, at("2026-02-04T00:00:00Z"));
+    assert_eq!(e, at("2026-03-04T00:00:00Z"));
+
+    // One second before the boundary is still the old cycle.
+    let (s, _) = timeutil::cycle_bounds(at("2026-02-03T23:59:59Z"), 4);
+    assert_eq!(s, at("2026-01-04T00:00:00Z"));
+
+    // Jan 31 -> Feb 28 in a non-leap year.
+    let (s, e) = timeutil::cycle_bounds(at("2026-01-31T12:00:00Z"), 31);
+    assert_eq!(s, at("2026-01-31T00:00:00Z"));
+    assert_eq!(e, at("2026-02-28T00:00:00Z"));
+    // ...and Feb 28 -> Mar 31, because March can hold the 31st again.
+    let (s, e) = timeutil::cycle_bounds(at("2026-02-28T12:00:00Z"), 31);
+    assert_eq!(s, at("2026-02-28T00:00:00Z"));
+    assert_eq!(e, at("2026-03-31T00:00:00Z"));
+
+    // A leap year can hold Feb 29.
+    let (_, e) = timeutil::cycle_bounds(at("2028-01-31T12:00:00Z"), 31);
+    assert_eq!(e, at("2028-02-29T00:00:00Z"));
+
+    // Ordinary month lengths.
+    let (_, e) = timeutil::cycle_bounds(at("2026-03-15T00:00:00Z"), 30);
+    assert_eq!(e, at("2026-03-30T00:00:00Z"));
+    let (_, e) = timeutil::cycle_bounds(at("2026-04-15T00:00:00Z"), 30);
+    assert_eq!(e, at("2026-04-30T00:00:00Z"));
+    // April has no 31st, so the anchor clamps to the 30th.
+    let (_, e) = timeutil::cycle_bounds(at("2026-04-15T00:00:00Z"), 31);
+    assert_eq!(e, at("2026-04-30T00:00:00Z"));
+}
+
+/// The cycle must be continuous: every instant belongs to exactly one cycle, and consecutive
+/// cycles meet end-to-start with no gap and no overlap.
+#[test]
+fn cycles_tile_the_timeline_without_gaps() {
+    for anchor in [1u32, 4, 15, 28, 29, 30, 31] {
+        let mut now = timeutil::parse_iso8601("2026-01-01T00:00:00Z").unwrap();
+        // Collect the distinct cycles the walk lands in, in order. Comparing raw samples would
+        // compare the same cycle against itself; the property under test is about consecutive
+        // cycles meeting exactly.
+        let mut seen: Vec<(i64, i64)> = Vec::new();
+        // ~3-day steps over ~40 months, long enough for every anchor to land on Feb 29 and on the
+        // short months several times over.
+        for _ in 0..420 {
+            let (s, e) = timeutil::cycle_bounds(now, anchor);
+            assert!(s <= now && now < e, "anchor {anchor}: {now} not inside [{s}, {e})");
+            assert!(s < e, "anchor {anchor}: empty cycle [{s}, {e})");
+            if seen.last().map(|(ls, _)| *ls) != Some(s) {
+                seen.push((s, e));
+            }
+            now += 3 * 86400 + 3600;
+        }
+        assert!(seen.len() > 8, "anchor {anchor}: only {} cycles walked", seen.len());
+        for pair in seen.windows(2) {
+            assert_eq!(pair[0].1, pair[1].0, "anchor {anchor}: gap or overlap at {}", pair[1].0);
+        }
+    }
+}
+
+/// A day-of-month outside 1-31 cannot describe a cycle; the parser refuses it instead of silently
+/// clamping to something the user did not ask for.
+#[test]
+fn an_impossible_cycle_day_is_rejected_with_a_warning() {
+    let yaml = r#"
+plans:
+  - name: p1
+    url: https://example.com/v1
+    key: sk-x
+    model: m
+    quota: { unit: rmb, cycle_day: 45, monthly: 200 }
+"#;
+    let c = config::parse(yaml, std::path::Path::new("t.yaml")).unwrap();
+    assert_eq!(c.find("p1").unwrap().quota.cycle_day, 0, "45 is not a day of the month");
+    assert!(c.warnings.iter().any(|w| w.contains("cycle_day")), "{:?}", c.warnings);
+
+    // 0 is meaningful: it selects the plain sliding window.
+    let yaml = yaml.replace("cycle_day: 45", "cycle_day: 0");
+    let c = config::parse(&yaml, std::path::Path::new("t.yaml")).unwrap();
+    assert!(!c.find("p1").unwrap().quota.has_cycle());
+}
+
+/// The calibration anchor must describe only the cycle it was taken in. This is the whole reason it
+/// carries an instant: without that bound the correction would be re-applied every cycle, quietly
+/// inventing usage the provider never recorded.
+#[test]
+fn a_calibration_anchor_expires_with_its_cycle() {
+    use crate::config::{QuotaCfg, QuotaProbe, QuotaUnit};
+    use crate::state::{LocalLedger, QuotaState};
+
+    let at = |s: &str| timeutil::parse_iso8601(s).unwrap();
+    let mut q = QuotaState::default();
+    // Anchor on the 26th, so the cycle containing 2026-08-30 runs Aug 26 -> Sep 26.
+    let cfg = QuotaCfg {
+        unit: QuotaUnit::Rmb,
+        monthly: 200.0,
+        cycle_day: 26,
+        refresh_secs: 300,
+        ..QuotaCfg::default()
+    };
+
+    // The provider's console said 50% on Aug 28, and the router forwarded 20 RMB since.
+    let anchored = QuotaCfg {
+        used_percent: 50.0,
+        used_at: at("2026-08-28T00:00:00Z"),
+        ..cfg.clone()
+    };
+    q.ledger = LocalLedger::default();
+    q.ledger.add(at("2026-08-28T00:00:00Z"), 20.0, 0);
+    let r = q.report(at("2026-08-30T00:00:00Z"), 3_600, 80.0, true, 99.0, &anchored);
+    let used = r.monthly.used;
+    assert!((used - 120.0).abs() < 1e-6, "50% of 200 + 20 = 120, got {used}");
+    assert!((r.monthly.pct - 60.0).abs() < 1e-6, "got {}", r.monthly.pct);
+
+    // The next cycle starts Sep 26. The Aug 28 reading says nothing about it, so it must not apply,
+    // and the Aug 28 request must not be counted either.
+    let r2 = q.report(at("2026-09-27T00:00:00Z"), 3_600, 80.0, true, 99.0, &anchored);
+    assert_eq!(r2.monthly.used, 0.0, "a stale anchor must not be re-applied");
+
+    // Within the new cycle the anchor is dead but traffic still counts.
+    q.ledger.add(at("2026-09-27T00:00:00Z"), 30.0, 0);
+    let r3 = q.report(at("2026-09-28T00:00:00Z"), 3_600, 80.0, true, 99.0, &anchored);
+    assert!((r3.monthly.used - 30.0).abs() < 1e-6, "got {}", r3.monthly.used);
+
+    // The cycle end is reported, because unlike a sliding window it is knowable locally.
+    assert_eq!(r3.monthly.resets_at, Some(at("2026-10-26T00:00:00Z")));
+
+    // A genuine 0% reading still counts as data: the user is asserting "the provider says empty",
+    // which is different from "the router has not seen anything".
+    let anchor_zero = QuotaCfg { used_percent: 0.0, ..anchored.clone() };
+    let r4 = q.report(at("2026-08-30T00:00:00Z"), 3_600, 80.0, true, 99.0, &anchor_zero);
+    q.ledger.add(at("2026-08-30T00:00:00Z"), 5.0, 0);
+    let r5 = q.report(at("2026-08-31T00:00:00Z"), 3_600, 80.0, true, 99.0, &anchor_zero);
+    assert!(r5.monthly.used >= r4.monthly.used, "traffic keeps accruing inside the cycle");
+}
+
+/// Without a cycle the monthly window must keep behaving as the plain 30-day sliding sum it always
+/// was, so existing endpoints are untouched.
+#[test]
+fn a_plan_without_a_cycle_keeps_the_sliding_window() {
+    use crate::config::{QuotaCfg, QuotaUnit};
+    use crate::state::{LocalLedger, QuotaState};
+
+    let at = |s: &str| timeutil::parse_iso8601(s).unwrap();
+    let mut q = QuotaState::default();
+    let cfg = QuotaCfg {
+        unit: QuotaUnit::Rmb,
+        monthly: 200.0,
+        cycle_day: 0,
+        ..QuotaCfg::default()
+    };
+    q.ledger = LocalLedger::default();
+    q.ledger.add(at("2026-08-01T00:00:00Z"), 40.0, 0);
+
+    // 31 days later the sample has slid out of the 30-day window.
+    let r = q.report(at("2026-09-01T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg);
+    assert_eq!(r.monthly.used, 0.0, "sliding window must still forget old samples");
+    assert_eq!(r.monthly.resets_at, None, "a sliding window has no reset instant");
+
+    let r2 = q.report(at("2026-08-15T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg);
+    assert!((r2.monthly.used - 40.0).abs() < 1e-6);
+}
+
+/// An anchor with no instant cannot be placed in time, so it would apply to every cycle forever.
+#[test]
+fn a_calibration_without_an_instant_is_refused() {
+    let yaml = r#"
+plans:
+  - name: p1
+    url: https://example.com/v1
+    key: sk-x
+    model: m
+    quota: { unit: rmb, cycle_day: 26, monthly: 200, used_percent: 50 }
+"#;
+    let c = config::parse(yaml, std::path::Path::new("t.yaml")).unwrap();
+    let q = c.find("p1").unwrap();
+    assert_eq!(q.quota.used_percent, 0.0, "an unbounded anchor must not survive");
+    assert!(c.warnings.iter().any(|w| w.contains("used_at")), "{:?}", c.warnings);
+
+    // With an instant it is accepted, and an out-of-range percentage is not.
+    let yaml = yaml.replace("used_percent: 50", "used_percent: 50, used_at: \"2026-08-28T00:00:00Z\"");
+    let c = config::parse(&yaml, std::path::Path::new("t.yaml")).unwrap();
+    let q = c.find("p1").unwrap();
+    assert!((q.quota.used_percent - 50.0).abs() < 1e-9);
+    assert!(q.quota.used_at > 0);
+
+    let yaml = yaml.replace("used_percent: 50", "used_percent: 150");
+    let c = config::parse(&yaml, std::path::Path::new("t.yaml")).unwrap();
+    assert_eq!(c.find("p1").unwrap().quota.used_percent, 0.0);
+    assert!(c.warnings.iter().any(|w| w.contains("outside 0-100")), "{:?}", c.warnings);
+}
+
 // ------------------------------------------------------------------ quota unit reporting
 
 /// A plan budgeted in money with no probe must not claim its used/limit figures are unitless.
@@ -557,11 +762,10 @@ fn a_remote_probe_keeps_its_own_unit() {
 
     let cfg = QuotaCfg {
         unit: QuotaUnit::Tokens,
-        rolling: 0.0,
-        weekly: 0.0,
         monthly: 1000.0,
         probe: QuotaProbe::Usage,
         refresh_secs: 60,
+        ..QuotaCfg::default()
     };
     let q = QuotaState::default();
     let report = q.report(1_000_000, 3_600, 80.0, true, 99.0, &cfg);

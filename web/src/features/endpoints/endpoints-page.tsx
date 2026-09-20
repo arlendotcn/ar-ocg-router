@@ -32,7 +32,17 @@ const BLANK: EndpointCfg = {
   inject_session: false,
   headers: {},
   drop_params: [],
-  quota: { unit: "none", rolling: 0, weekly: 0, monthly: 0, probe: "none", refresh_secs: 300 },
+  quota: {
+    unit: "none",
+    rolling: 0,
+    weekly: 0,
+    monthly: 0,
+    probe: "none",
+    refresh_secs: 300,
+    cycle_day: 0,
+    used_percent: 0,
+    used_at: 0,
+  },
   enabled: true,
 };
 

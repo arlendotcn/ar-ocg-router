@@ -219,6 +219,52 @@ pub struct QuotaCfg {
     pub probe: QuotaProbe,
     /// How often the probe runs.
     pub refresh_secs: u64,
+    /// Day-of-month the subscription cycle restarts, 0 = use a plain 30-day sliding window.
+    ///
+    /// A subscription plan grants its whole allowance per billing cycle, and the provider resets it
+    /// on the same day-of-month the plan was bought ("bought Jan 4, expires Feb 4 at 23:59:59").
+    /// That is a *fixed* cycle, and a sliding 30-day sum cannot express it: on the day the provider
+    /// resets, the sliding window still carries the whole previous month, so the local percentage
+    /// starts high and only becomes correct a month later.
+    ///
+    /// A month too short for the anchor uses that month's last day (Jan 31 -> Feb 28), which is the
+    /// provider's own rule rather than a workaround.
+    pub cycle_day: u32,
+    /// Percentage the provider's console showed as of `used_at`. 0 = no anchor (pure local
+    /// accounting).
+    ///
+    /// The router only sees the traffic it forwarded, so a plan that was already partly spent - by
+    /// another tool, or before the endpoint was configured - would read as unused. This pair says
+    /// "at instant X the provider said Y%", and the local figure becomes
+    /// `Y% of the limit + everything the router forwarded since X`.
+    ///
+    /// A percentage rather than an amount because that is what the provider's console shows: the
+    /// user copies one number instead of converting it, and the conversion (percentage of a limit
+    /// the config already states) is arithmetic the router can do exactly.
+    ///
+    /// The instant is not bookkeeping: it is the whole reason the correction expires by itself. An
+    /// anchor from a previous cycle is ignored, so the number cannot leak into the next billing
+    /// period, and re-calibrating mid-cycle is just editing the pair again.
+    pub used_percent: f64,
+    /// Unix seconds the `used_percent` reading was taken. 0 = unset (anchor ignored).
+    pub used_at: i64,
+}
+
+impl Default for QuotaCfg {
+    /// Nothing measured, no sliding windows, no cycle: a plan the router only counts locally.
+    fn default() -> Self {
+        QuotaCfg {
+            unit: QuotaUnit::None,
+            rolling: 0.0,
+            weekly: 0.0,
+            monthly: 0.0,
+            probe: QuotaProbe::None,
+            refresh_secs: 300,
+            cycle_day: 0,
+            used_percent: 0.0,
+            used_at: 0,
+        }
+    }
 }
 
 impl QuotaCfg {
@@ -240,28 +286,29 @@ impl QuotaCfg {
                 monthly: 15.0,
                 probe: QuotaProbe::Usage,
                 refresh_secs: 60,
+                ..QuotaCfg::default()
             },
             ProviderKind::DeepSeek => QuotaCfg {
                 unit: QuotaUnit::None,
-                rolling: 0.0,
-                weekly: 0.0,
-                monthly: 0.0,
                 probe: QuotaProbe::Balance,
                 refresh_secs: 300,
+                ..QuotaCfg::default()
             },
             ProviderKind::Generic => QuotaCfg {
-                unit: QuotaUnit::None,
-                rolling: 0.0,
-                weekly: 0.0,
-                monthly: 0.0,
                 probe: QuotaProbe::None,
                 refresh_secs: 300,
+                ..QuotaCfg::default()
             },
         }
     }
 
     pub fn measures_something(&self) -> bool {
         self.unit != QuotaUnit::None && (self.rolling > 0.0 || self.weekly > 0.0 || self.monthly > 0.0)
+    }
+
+    /// True when the plan's allowance restarts on a fixed day-of-month rather than sliding.
+    pub fn has_cycle(&self) -> bool {
+        self.cycle_day >= 1
     }
 }
 
@@ -708,6 +755,20 @@ fn yfloat(v: &Y, default: f64) -> f64 {
         Y::String(s) => s.trim().parse().unwrap_or(default),
         _ => default,
     }
+}
+
+/// A calibration instant, written as unix seconds or an ISO-8601 string. The console writes unix
+/// seconds (it knows the clock); a hand-edited config may use either.
+fn parse_used_at(v: &Y) -> Option<i64> {
+    match v {
+        Y::String(s) => {
+            let t = s.trim();
+            crate::timeutil::parse_iso8601(t).or_else(|| t.parse::<i64>().ok())
+        }
+        Y::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
+        _ => None,
+    }
+    .filter(|ts| *ts > 0)
 }
 
 /// Split a scalar or sequence into trimmed tokens (comma / space / semicolon / pipe).
@@ -1223,6 +1284,49 @@ pub fn parse(raw: &str, path: &Path) -> Result<Config, String> {
                     }
                     if let Some(x) = yget_any(qm, &["refresh_secs", "refresh", "fetch_seconds"]) {
                         quota.refresh_secs = yint(x, quota.refresh_secs as i64).max(5) as u64;
+                    }
+                    if let Some(x) = yget_any(qm, &["cycle_day", "reset_day", "renewal_day"]) {
+                        let d = yint(x, 0);
+                        if (1..=31).contains(&d) {
+                            quota.cycle_day = d as u32;
+                        } else if d == 0 {
+                            quota.cycle_day = 0;
+                        } else {
+                            warnings.push(format!(
+                                "{}[{}].quota.cycle_day {} is not a day of the month (1-31), keeping {}",
+                                key, idx, d, quota.cycle_day
+                            ));
+                        }
+                    }
+                    if let Some(x) = yget_any(qm, &["used_percent", "used_pct", "used"]) {
+                        let p = yfloat(x, 0.0);
+                        if !(0.0..=100.0).contains(&p) && p != 0.0 {
+                            warnings.push(format!(
+                                "{}[{}].quota.used_percent {} is outside 0-100, ignoring the anchor",
+                                key, idx, p
+                            ));
+                            quota.used_percent = 0.0;
+                        } else {
+                            quota.used_percent = p;
+                        }
+                    }
+                    if let Some(x) = yget_any(qm, &["used_at", "used_since", "as_of"]) {
+                        match parse_used_at(x) {
+                            Some(ts) => quota.used_at = ts,
+                            None => warnings.push(format!(
+                                "{}[{}].quota.used_at is not an ISO-8601 timestamp or unix seconds, ignoring the anchor",
+                                key, idx
+                            )),
+                        }
+                    }
+                    // An anchor without an instant cannot be placed in time, so the ledger could not
+                    // be split around it and the correction would apply forever. Refuse it loudly.
+                    if quota.used_percent > 0.0 && quota.used_at == 0 {
+                        warnings.push(format!(
+                            "{}[{}].quota.used_percent is set without used_at, so it cannot be bounded to a cycle; ignoring it",
+                            key, idx
+                        ));
+                        quota.used_percent = 0.0;
                     }
                     // tokens are a plain count: keep them integral-ish but allow floats
                     if quota.unit == QuotaUnit::Tokens {

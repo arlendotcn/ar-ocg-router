@@ -59,6 +59,10 @@ export function EndpointSheet({
     setDraft((d) => (d ? { ...d, quota: { ...d.quota, [k]: v } } : d));
   const setPrices = (patch: Partial<EndpointCfg["prices"]>) =>
     setDraft((d) => (d ? { ...d, prices: { ...d.prices, ...patch } } : d));
+  // Calibrating needs two fields changed together (the reading and the instant it was taken), and
+  // the instant must not survive without a reading.
+  const setQuotaPatch = (patch: Partial<EndpointCfg["quota"]>) =>
+    setDraft((d) => (d ? { ...d, quota: { ...d.quota, ...patch } } : d));
 
   const parseHeaders = (text: string) => {
     const out: Record<string, string> = {};
@@ -257,6 +261,49 @@ export function EndpointSheet({
               </Field>
               <Field label={t.endpoints.monthly}>
                 <Input type="number" value={draft.quota.monthly} onChange={(e) => setQuota("monthly", Number(e.target.value) || 0)} />
+              </Field>
+            </div>
+          ) : null}
+          {/* A subscription resets its whole allowance on a fixed day of the month, which a sliding
+              window cannot express. Leaving this at 0 keeps the old sliding behaviour, so the field
+              stays visible even when the month limit is unset. */}
+          {draft.quota.unit !== "none" ? (
+            <Field label={t.endpoints.cycleDay} help={t.endpoints.cycleDayHint}>
+              <Input
+                type="number"
+                min={0}
+                max={31}
+                value={draft.quota.cycle_day}
+                onChange={(e) => setQuota("cycle_day", Math.min(31, Math.max(0, Number(e.target.value) || 0)))}
+              />
+            </Field>
+          ) : null}
+          {/* Calibration only makes sense on a cycle: it is bounded by the cycle boundary, so
+              without one it could never expire. */}
+          {draft.quota.unit !== "none" && draft.quota.cycle_day > 0 ? (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label={t.endpoints.usedPercent} help={t.endpoints.usedPercentHint}>
+                <Input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step="0.1"
+                  value={draft.quota.used_percent}
+                  onChange={(e) => {
+                    const pct = Math.min(100, Math.max(0, Number(e.target.value) || 0));
+                    // The instant is what bounds the reading to one cycle, so it is stamped here
+                    // rather than asked for: the user is pasting what the provider's console shows
+                    // right now. Clearing the percentage clears the anchor with it.
+                    setQuotaPatch({ used_percent: pct, used_at: pct > 0 ? Math.floor(Date.now() / 1000) : 0 });
+                  }}
+                />
+              </Field>
+              <Field label={t.endpoints.usedAt} help={t.endpoints.usedAtHint}>
+                <Input
+                  type="number"
+                  value={draft.quota.used_at}
+                  onChange={(e) => setQuota("used_at", Number(e.target.value) || 0)}
+                />
               </Field>
             </div>
           ) : null}

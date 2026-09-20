@@ -223,6 +223,9 @@ fn account_cfg_json(a: &AccountCfg) -> Value {
             "monthly": a.quota.monthly,
             "probe": a.quota.probe.as_str(),
             "refresh_secs": a.quota.refresh_secs,
+            "cycle_day": a.quota.cycle_day,
+            "used_percent": a.quota.used_percent,
+            "used_at": a.quota.used_at,
         },
         "enabled": a.is_enabled(),
     })
@@ -577,7 +580,7 @@ fn endpoint_yaml(
     }
     let q = e.get("quota").cloned().unwrap_or(Value::Null);
     s.push_str(&format!(
-        "quota: {{ unit: {}, rolling: {}, weekly: {}, monthly: {}, probe: {}, refresh_secs: {} }}\n",
+        "quota: {{ unit: {}, rolling: {}, weekly: {}, monthly: {}, probe: {}, refresh_secs: {}",
         yaml_str(str_at(&q, "unit").unwrap_or("none")),
         num_at(&q, "rolling").unwrap_or(0.0),
         num_at(&q, "weekly").unwrap_or(0.0),
@@ -585,6 +588,18 @@ fn endpoint_yaml(
         yaml_str(str_at(&q, "probe").unwrap_or("none")),
         int_at(&q, "refresh_secs").unwrap_or(300)
     ));
+    // Cycle fields are written only when set: an untouched endpoint should not gain two lines that
+    // say "no cycle" in a config a human will read.
+    let cycle_day = int_at(&q, "cycle_day").unwrap_or(0);
+    if cycle_day > 0 {
+        s.push_str(&format!(", cycle_day: {}", cycle_day));
+    }
+    let used_percent = num_at(&q, "used_percent").unwrap_or(0.0);
+    let used_at = int_at(&q, "used_at").unwrap_or(0);
+    if used_percent > 0.0 && used_at > 0 {
+        s.push_str(&format!(", used_percent: {}, used_at: {}", used_percent, used_at));
+    }
+    s.push_str(" }\n");
     let drop: Vec<String> = e
         .get("drop_params")
         .and_then(|v| v.as_array())

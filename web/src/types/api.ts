@@ -126,6 +126,16 @@ export type QuotaCfg = {
   monthly: number;
   probe: "usage" | "balance" | "none";
   refresh_secs: number;
+  /**
+   * Day of the month the subscription's allowance restarts (1-31, a short month uses its last day).
+   * 0 = no cycle: the monthly window is a plain 30-day sliding sum. A plan bought on the 26th has
+   * its whole allowance reset on the 26th, which a sliding sum cannot express.
+   */
+  cycle_day: number;
+  /** Percentage the provider's console showed as of `used_at`; 0 = no calibration. */
+  used_percent: number;
+  /** Unix seconds `used_percent` was read at. 0 = unset (the calibration is ignored). */
+  used_at: number;
 };
 
 export type EndpointCfg = {

@@ -80,6 +80,54 @@ pub fn civil_from_unix(secs: i64) -> Civil {
     }
 }
 
+/// Days in a Gregorian month (1-12).
+pub fn days_in_month(y: i64, m: u32) -> u32 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 30,
+    }
+}
+
+/// The midnight that starts a subscription cycle, for an anchor day-of-month.
+///
+/// The provider's rule is "bought on the 4th, expires the next month on the 4th at 23:59:59", and
+/// "bought on Jan 31, expires Feb 28" - so the anchor is the day-of-month, and a month too short to
+/// hold it uses that month's last day. The cycle boundary is midnight; the 23:59:59 the provider
+/// shows is the same instant written from the other side, not a separate rule.
+///
+/// Returns the start of the cycle containing `now`, and the start of the next one. Both are local
+/// midnights in the router's own clock (see util::now_secs), which is the only clock we have.
+pub fn cycle_bounds(now: i64, anchor_day: u32) -> (i64, i64) {
+    let anchor_day = anchor_day.clamp(1, 31);
+    let c = civil_from_unix(now);
+    // The anchor for this calendar month, clamped into a month that is too short for it.
+    let this_month = days_from_civil(
+        c.year,
+        c.month,
+        anchor_day.min(days_in_month(c.year, c.month)),
+    ) * 86400;
+    let (start, next) = if now >= this_month {
+        // We are past this month's anchor, so the cycle runs to next month's.
+        let (y, m) = if c.month == 12 { (c.year + 1, 1) } else { (c.year, c.month + 1) };
+        let n = days_from_civil(y, m, anchor_day.min(days_in_month(y, m))) * 86400;
+        (this_month, n)
+    } else {
+        // Before this month's anchor: the cycle started in the previous month.
+        let (y, m) = if c.month == 1 { (c.year - 1, 12) } else { (c.year, c.month - 1) };
+        let p = days_from_civil(y, m, anchor_day.min(days_in_month(y, m))) * 86400;
+        (p, this_month)
+    };
+    (start, next)
+}
+
 pub fn iso8601(secs: i64) -> String {
     let c = civil_from_unix(secs);
     format!(

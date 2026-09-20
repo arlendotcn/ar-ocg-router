@@ -49,6 +49,10 @@ fn yusize(v: usize) -> Y {
     Y::Number(serde_yaml::Number::from(v as u64))
 }
 
+fn yi64(v: i64) -> Y {
+    Y::Number(serde_yaml::Number::from(v))
+}
+
 /// Floats that are whole numbers are written out as integers (12.0 -> 12), which is what a
 /// hand-written config would say; the parser reads both forms identically.
 fn yfloat(v: f64) -> Y {
@@ -101,14 +105,25 @@ fn modes_str(modes: &[Mode]) -> String {
 }
 
 fn quota_map(q: &QuotaCfg) -> Y {
-    ymap(vec![
+    let mut m = vec![
         ("unit", ystr(q.unit.as_str())),
         ("rolling", yfloat(q.rolling)),
         ("weekly", yfloat(q.weekly)),
         ("monthly", yfloat(q.monthly)),
         ("probe", ystr(q.probe.as_str())),
         ("refresh_secs", yu64(q.refresh_secs)),
-    ])
+    ];
+    // Written only when set, so an endpoint the user never calibrated keeps the short form and the
+    // file stays readable. A cycle day of 0 is the documented "no cycle" value, not a thing to
+    // spell out.
+    if q.has_cycle() {
+        m.push(("cycle_day", yu64(q.cycle_day as u64)));
+    }
+    if q.used_percent > 0.0 && q.used_at > 0 {
+        m.push(("used_percent", yfloat(q.used_percent)));
+        m.push(("used_at", yi64(q.used_at)));
+    }
+    ymap(m)
 }
 
 /// True when the rules are exactly the parser default (a single Rule::Always).
@@ -533,6 +548,9 @@ plans:
       monthly: 11
       probe: usage
       refresh_secs: 45
+      cycle_day: 26
+      used_percent: 42.5
+      used_at: 1756339200
   - name: plan-two
     url: https://plan.example.com/v1
     key: sk-plan-two
@@ -683,6 +701,9 @@ fallback:
             assert_eq!(got.quota.weekly, want.quota.weekly);
             assert_eq!(got.quota.monthly, want.quota.monthly);
             assert_eq!(got.quota.refresh_secs, want.quota.refresh_secs);
+            assert_eq!(got.quota.cycle_day, want.quota.cycle_day);
+            assert_eq!(got.quota.used_percent, want.quota.used_percent);
+            assert_eq!(got.quota.used_at, want.quota.used_at);
             assert_eq!(got.inject_session, want.inject_session);
             assert_eq!(got.drop_params, want.drop_params);
         }

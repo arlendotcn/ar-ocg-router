@@ -217,6 +217,32 @@ impl LocalLedger {
         }
     }
 
+    /// Cost accumulated at or after `since`. A fixed cycle cannot be expressed as a sliding
+    /// period: it has an absolute start, and the two differ on the day the provider resets.
+    pub fn cost_since(&self, since: i64) -> f64 {
+        let sum: f64 = self
+            .samples
+            .iter()
+            .rev()
+            .take_while(|(ts, _, _)| *ts >= since)
+            .map(|(_, c, _)| *c)
+            .sum();
+        if sum == 0.0 {
+            0.0
+        } else {
+            sum
+        }
+    }
+
+    pub fn tokens_since(&self, since: i64) -> u64 {
+        self.samples
+            .iter()
+            .rev()
+            .take_while(|(ts, _, _)| *ts >= since)
+            .map(|(_, _, t)| *t)
+            .sum()
+    }
+
     pub fn window_tokens(&self, now: i64, period_secs: i64) -> u64 {
         let from = now - period_secs;
         self.samples
@@ -318,6 +344,17 @@ pub struct QuotaReport {
     pub monthly: QuotaView,
 }
 
+/// The active billing cycle (start, next start) when the plan has one, else None.
+///
+/// Only the monthly window can be a cycle: the provider restarts the whole allowance on the
+/// anchor day, whereas a 5-hour or weekly budget is a rolling limit with no such restart.
+fn cycle_window(now: i64, quota: &QuotaCfg) -> Option<(i64, i64)> {
+    if !quota.has_cycle() || quota.monthly <= 0.0 {
+        return None;
+    }
+    Some(crate::timeutil::cycle_bounds(now, quota.cycle_day))
+}
+
 fn status_exhausted(s: &str) -> bool {
     let t = s.trim().to_ascii_lowercase();
     !t.is_empty() && t != "ok" && t != "normal" && t != "active"
@@ -327,6 +364,9 @@ const PERIOD_ROLLING: i64 = 5 * 3600;
 const PERIOD_WEEKLY: i64 = 7 * 86400;
 const PERIOD_MONTHLY: i64 = 30 * 86400;
 
+/// `cycle` is the (start, next start) of a fixed billing cycle, when the plan has one. Unlike a
+/// rolling window, those instants are knowable locally (they are anchor days), so the console can
+/// show a countdown and a projection that match the provider's own.
 fn view(
     win: &QuotaWindow,
     period: i64,
@@ -334,6 +374,7 @@ fn view(
     local: Option<(f64, f64)>,
     limit: f64,
     use_remote: bool,
+    cycle: Option<(i64, i64)>,
 ) -> QuotaView {
     if use_remote && (win.pct > 0.0 || win.resets_at.is_some() || !win.status.is_empty()) {
         let frac = match win.resets_at {
@@ -353,14 +394,29 @@ fn view(
         };
     }
     match local {
-        Some((used, pct)) => QuotaView {
-            pct,
-            projected_pct: pct,
-            resets_at: None,
-            has_data: true,
-            used,
-            limit,
-        },
+        Some((used, pct)) => {
+            // Projection needs the elapsed fraction of the window. For a fixed cycle we know both
+            // ends outright; for a rolling one we assume the caller just started observing it, as
+            // before, which is why the sliding case has never reported a projection.
+            let (projected, resets_at) = match cycle {
+                Some((start, end)) if end > now => {
+                    // The cycle's real length, not the nominal month: a billing period can be 28
+                    // days (Jan 31 -> Feb 28), and projecting against 30 would understate it.
+                    let len = (end - start).max(1) as f64;
+                    let elapsed = (now - start).max(1) as f64;
+                    (pct * len / elapsed, Some(end))
+                }
+                _ => (pct, None),
+            };
+            QuotaView {
+                pct,
+                projected_pct: projected.clamp(0.0, 999.0),
+                resets_at,
+                has_data: true,
+                used,
+                limit,
+            }
+        }
         None => QuotaView {
             pct: 0.0,
             projected_pct: 0.0,
@@ -395,19 +451,42 @@ impl QuotaState {
         // What the windows are made of. A currency budget is spent from the ledger, whose amounts
         // are denominated in prices.currency; the "unit" label only names the measure.
         let accounting = accounting_of(quota);
+        // A subscription plan restarts its allowance on a fixed day-of-month, so its window has an
+        // absolute start rather than a trailing period. Everything else keeps sliding.
+        let cycle = cycle_window(now, quota);
+        let ledger_sum = |from: i64| match quota.unit {
+            // Both currencies read the same amount: the unit is a label, never a conversion.
+            // Listed explicitly rather than behind a guard, because a guard does not make a
+            // match exhaustive and adding a currency would then fail to compile elsewhere.
+            QuotaUnit::Usd | QuotaUnit::Rmb => self.ledger.cost_since(from),
+            QuotaUnit::Tokens => self.ledger.tokens_since(from) as f64,
+            QuotaUnit::None => 0.0,
+        };
         let local = |period: i64, limit: f64| -> Option<(f64, f64)> {
             if limit <= 0.0 || quota.unit == QuotaUnit::None {
                 return None;
             }
-            let used = match quota.unit {
-                // Both currencies read the same amount: the unit is a label, never a conversion.
-                // Listed explicitly rather than behind a guard, because a guard does not make a
-                // match exhaustive and adding a currency would then fail to compile elsewhere.
-                QuotaUnit::Usd | QuotaUnit::Rmb => self.ledger.window_cost(now, period),
-                QuotaUnit::Tokens => self.ledger.window_tokens(now, period) as f64,
-                QuotaUnit::None => return None,
+            let used = match cycle {
+                // Inside a fixed cycle: the calibration anchor (if it belongs to this cycle) plus
+                // everything forwarded since it. The anchor is deliberately dropped once the cycle
+                // rolls over - a reading taken in the previous cycle says nothing about this one.
+                Some((cyc_start, _)) => {
+                    let base = match (quota.used_percent, quota.used_at) {
+                        (p, ts) if p > 0.0 && ts >= cyc_start && ts <= now => limit * p / 100.0,
+                        _ => 0.0,
+                    };
+                    let from = match (quota.used_percent, quota.used_at) {
+                        (p, ts) if p > 0.0 && ts >= cyc_start && ts <= now => ts,
+                        _ => cyc_start,
+                    };
+                    base + ledger_sum(from)
+                }
+                None => ledger_sum(now - period),
             };
-            if used <= 0.0 && !trust_empty_ledger {
+            // A calibrated plan has data even at 0%: the anchor is a statement about the provider's
+            // counter, while an uncalibrated empty ledger only means "we sent nothing yet".
+            let calibrated = cycle.is_some() && quota.used_percent > 0.0;
+            if used <= 0.0 && !trust_empty_ledger && !calibrated {
                 return None;
             }
             Some((used, (used / limit * 100.0).clamp(0.0, 999.0)))
@@ -417,9 +496,10 @@ impl QuotaState {
         let lp_monthly = local(PERIOD_MONTHLY, quota.monthly);
         let has_local = lp_rolling.is_some() || lp_weekly.is_some() || lp_monthly.is_some();
 
-        let rolling = view(&self.rolling, PERIOD_ROLLING, now, lp_rolling, quota.rolling, use_remote);
-        let weekly = view(&self.weekly, PERIOD_WEEKLY, now, lp_weekly, quota.weekly, use_remote);
-        let monthly = view(&self.monthly, PERIOD_MONTHLY, now, lp_monthly, quota.monthly, use_remote);
+        // Only the monthly window has a cycle; the shorter windows stay rolling sums.
+        let rolling = view(&self.rolling, PERIOD_ROLLING, now, lp_rolling, quota.rolling, use_remote, None);
+        let weekly = view(&self.weekly, PERIOD_WEEKLY, now, lp_weekly, quota.weekly, use_remote, None);
+        let monthly = view(&self.monthly, PERIOD_MONTHLY, now, lp_monthly, quota.monthly, use_remote, cycle);
 
         let max_pct = rolling.pct.max(weekly.pct).max(monthly.pct);
         let max_projected = rolling.projected_pct.max(weekly.projected_pct).max(monthly.projected_pct);
