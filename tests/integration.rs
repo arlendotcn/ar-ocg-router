@@ -772,8 +772,9 @@ fn streaming_passthrough_is_incremental_and_accounted() {
     let cost = acc["stats"]["cost"].as_f64().unwrap();
     assert!((cost - 0.0008265).abs() < 1e-6, "cost={}", cost);
     assert_eq!(acc["stats"]["currency"], "USD", "the endpoint declares its currency");
-    // Savings are grouped by currency rather than summed across them.
-    let saved = v["savings"]["USD"]["saved"].as_f64().unwrap();
+    // A prepaid endpoint's consumption is recorded as savings: these tokens were covered by the
+    // plan instead of being paid for in cash.
+    let saved = acc["stats"]["saved"].as_f64().unwrap();
     assert!((saved - 0.0008265).abs() < 1e-6, "saved={}", saved);
 }
 

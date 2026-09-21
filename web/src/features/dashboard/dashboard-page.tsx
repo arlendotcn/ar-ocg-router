@@ -240,8 +240,8 @@ export function DashboardPage() {
         </div>
       </Plate>
 
-      {/* ---- counters + money ---- */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      {/* ---- counters ---- */}
+      <div className="grid grid-cols-2 gap-3">
         <Plate className="rise">
           <Readout
             label={t.dash.requests}
@@ -257,24 +257,6 @@ export function DashboardPage() {
             sub={`${t.dash.retries} ${fmtNum(c.retries)} · ${fmtBytes(c.bytes_out)}`}
           />
         </Plate>
-        {/* One card per currency, because these are not one sum: see the note on savings_json.
-            A currency with no endpoints of its own simply has no card. */}
-        {Object.entries(stats.savings).map(([cur, v]) => (
-          <Plate className="rise" key={cur}>
-            <Readout
-              label={cur === "UNSPECIFIED" ? t.dash.saved : `${t.dash.saved} · ${cur}`}
-              value={
-                <span className="mono text-sm leading-tight">
-                  <span style={{ color: "var(--up)" }}>{fmtMoney(v.saved, cur)}</span>
-                  <span className="mx-1.5 text-[var(--ink-faint)]">/</span>
-                  <span style={{ color: "var(--cash)" }}>{fmtMoney(v.spent, cur)}</span>
-                </span>
-              }
-              sub={`${t.dash.saved} / ${t.dash.spent}`}
-              help={t.dash.savedHint}
-            />
-          </Plate>
-        ))}
       </div>
 
       {/* ---- per side summary ---- */}
@@ -364,9 +346,11 @@ function SideSummary({ kind, accounts, used }: { kind: "plans" | "fallback"; acc
   const healthy = accounts.filter((a) => a.available).length;
   const tokens = accounts.reduce((n, a) => n + a.stats.prompt_tokens + a.stats.completion_tokens, 0);
   // Summed per currency: a plan billed in yuan and one billed in dollars cannot be added, and the
-  // side list can hold both.
+  // side list can hold both. An endpoint with no prices records no money, so it contributes an
+  // empty label over a zero — skipped rather than rendered as noise.
   const costs = accounts.reduce<Record<string, number>>((m, a) => {
-    const cur = a.stats.currency || "UNSPECIFIED";
+    if (!a.stats.currency) return m;
+    const cur = a.stats.currency;
     m[cur] = (m[cur] ?? 0) + (kind === "plans" ? a.stats.saved : a.stats.cost);
     return m;
   }, {});
@@ -384,6 +368,7 @@ function SideSummary({ kind, accounts, used }: { kind: "plans" | "fallback"; acc
         <Readout label={t.dash.tokens} value={fmtNum(tokens)} sub={kind === "plans" ? t.dash.saved : t.dash.cost} />
         <Readout
           label={kind === "plans" ? t.dash.saved : t.dash.cost}
+          help={t.dash.savedHint}
           value={
             <span className="mono text-sm leading-tight">
               {Object.entries(costs).map(([cur, v]) => (

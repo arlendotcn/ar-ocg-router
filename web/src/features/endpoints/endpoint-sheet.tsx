@@ -8,6 +8,7 @@ import { ChipInput, Field, Input, Select, Switch, Textarea } from "@/components/
 import { Sheet } from "@/components/ui/sheet";
 import { copyText } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { CalibrationWizard } from "./calibration-wizard";
 import { ModelPicker } from "@/components/model-picker";
 import type { EndpointCfg, ModelEntry, TestResult } from "@/types/api";
 
@@ -61,26 +62,6 @@ export function EndpointSheet({
     setDraft((d) => (d ? { ...d, prices: { ...d.prices, ...patch } } : d));
   const setQuotaPatch = (patch: Partial<EndpointCfg["quota"]>) =>
     setDraft((d) => (d ? { ...d, quota: { ...d.quota, ...patch } } : d));
-
-  /**
-   * Stamp the calibration instant, if and only if the reading actually changed.
-   *
-   * The instant is why a calibration expires: the local figure is "that percentage, plus everything
-   * forwarded since", so it has to mean *when the reading was taken* - which is the moment the user
-   * commits it. It is therefore not a field to reason about, and the console does not show it.
-   *
-   * Comparing against the saved endpoint rather than the draft is what keeps it honest. Editing an
-   * unrelated field on a calibrated endpoint must not push the instant forward, or traffic forwarded
-   * in between would count twice: once from the ledger, and once from a reading that now claims to
-   * have been taken after it.
-   */
-  const stampCalibration = (next: EndpointCfg, saved: EndpointCfg | null): EndpointCfg => {
-    const before = saved?.quota?.used_percent ?? 0;
-    const after = next.quota.used_percent ?? 0;
-    if (after === before) return next;
-    // Clearing the reading clears the instant with it: a percentage is what the anchor describes.
-    return { ...next, quota: { ...next.quota, used_at: after > 0 ? Math.floor(Date.now() / 1000) : 0 } };
-  };
 
   const parseHeaders = (text: string) => {
     const out: Record<string, string> = {};
@@ -141,7 +122,7 @@ export function EndpointSheet({
             onClick={() => {
               const headers = parseHeaders(headersText);
               set("headers", headers);
-              setTimeout(() => onCommit(stampCalibration({ ...draft, headers }, endpoint)), 0);
+              setTimeout(() => onCommit({ ...draft, headers }), 0);
             }}
           >
             {t.common.confirm}
@@ -297,23 +278,61 @@ export function EndpointSheet({
               />
             </Field>
           ) : null}
-          {/* Calibration only makes sense on a cycle: it is bounded by the cycle boundary, so
-              without one it could never expire. */}
-          {draft.quota.unit !== "none" && draft.quota.cycle_day > 0 ? (
-            <Field label={t.endpoints.usedPercent} help={t.endpoints.usedPercentHint}>
-              <Input
-                type="number"
-                min={0}
-                max={100}
-                step="0.1"
-                value={draft.quota.used_percent}
-                onChange={(e) =>
-                  setQuotaPatch({ used_percent: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })
-                }
-              />
+          {/* The price table belongs here, not under Advanced: after a calibration it stops being a
+              guess and becomes the endpoint's real per-token value, which is exactly what "how much
+              quota is left" is measured against. */}
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label={t.endpoints.prices} help={t.endpoints.pricesHint}>
+              <Select
+                value={draft.prices.currency}
+                onChange={(e) => setPrices({ currency: e.target.value })}
+              >
+                <option value="">{t.endpoints.priceCurrencyNone}</option>
+                <option value="USD">USD</option>
+                <option value="RMB">RMB</option>
+                <option value="CNY">CNY</option>
+              </Select>
             </Field>
-          ) : null}
+            <div className="grid grid-cols-2 gap-3">
+              <Field label={t.endpoints.priceIn}>
+                <Input
+                  type="number"
+                  step="any"
+                  value={draft.prices.input}
+                  onChange={(e) => setPrices({ input: Number(e.target.value) || 0 })}
+                />
+              </Field>
+              <Field label={t.endpoints.priceOut}>
+                <Input
+                  type="number"
+                  step="any"
+                  value={draft.prices.output}
+                  onChange={(e) => setPrices({ output: Number(e.target.value) || 0 })}
+                />
+              </Field>
+              <Field label={t.endpoints.priceCached}>
+                <Input
+                  type="number"
+                  step="any"
+                  value={draft.prices.cached_input}
+                  onChange={(e) => setPrices({ cached_input: Number(e.target.value) || 0 })}
+                />
+              </Field>
+              <Field label={t.endpoints.pricePeak}>
+                <Input
+                  type="number"
+                  step="any"
+                  value={draft.prices.peak_multiplier}
+                  onChange={(e) => setPrices({ peak_multiplier: Number(e.target.value) || 1 })}
+                />
+              </Field>
+            </div>
+          </div>
         </Section>
+
+        {/* Calibrating writes to the running registry and the saved prices, so it only exists for an
+            endpoint that already has a name on disk. */}
+        {endpoint && draft.name ? <CalibrationWizard endpoint={draft} onDone={onClose} /> : null}
 
         {/* ---------- advanced ---------- */}
         {/* Same plate as every other section, just collapsible: the fields inside are part of the
@@ -360,61 +379,6 @@ export function EndpointSheet({
                   set("max_output_tokens_limit", Number.isFinite(n) && n > 0 ? n : 0);
                 }}
               />
-            </Field>
-            {/* Rates are per endpoint and per provider, so they belong here rather than in a table
-                inside the binary. A currency alone is a label: the router never converts. */}
-            <Field
-              label={t.endpoints.prices}
-              help={t.endpoints.pricesHint}
-              hint={priceHint(draft, t)}
-            >
-              <div className="flex flex-wrap items-center gap-2">
-                <Select
-                  value={draft.prices.currency}
-                  onChange={(e) => setPrices({ currency: e.target.value })}
-                  className="w-[110px] shrink-0"
-                >
-                  <option value="">—</option>
-                  <option value="USD">USD</option>
-                  <option value="CNY">CNY</option>
-                </Select>
-                <span className="mono text-2xs text-[var(--ink-faint)]">{t.endpoints.priceIn}</span>
-                <Input
-                  type="number"
-                  step="0.001"
-                  min={0}
-                  className="w-[92px] shrink-0"
-                  value={draft.prices.input || ""}
-                  onChange={(e) => setPrices({ input: numOr0(e.target.value) })}
-                />
-                <span className="mono text-2xs text-[var(--ink-faint)]">{t.endpoints.priceOut}</span>
-                <Input
-                  type="number"
-                  step="0.001"
-                  min={0}
-                  className="w-[92px] shrink-0"
-                  value={draft.prices.output || ""}
-                  onChange={(e) => setPrices({ output: numOr0(e.target.value) })}
-                />
-                <span className="mono text-2xs text-[var(--ink-faint)]">{t.endpoints.priceCached}</span>
-                <Input
-                  type="number"
-                  step="0.001"
-                  min={0}
-                  className="w-[92px] shrink-0"
-                  value={draft.prices.cached_input || ""}
-                  onChange={(e) => setPrices({ cached_input: numOr0(e.target.value) })}
-                />
-                <span className="mono text-2xs text-[var(--ink-faint)]">{t.endpoints.pricePeak}</span>
-                <Input
-                  type="number"
-                  step="0.1"
-                  min={1}
-                  className="w-[72px] shrink-0"
-                  value={draft.prices.peak_multiplier}
-                  onChange={(e) => setPrices({ peak_multiplier: Number(e.target.value) || 1 })}
-                />
-              </div>
             </Field>
             <Field label={t.endpoints.headers} help={t.endpoints.headersHint}>
               <Textarea

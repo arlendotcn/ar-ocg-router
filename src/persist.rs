@@ -42,6 +42,9 @@ pub struct Persisted {
     pub ledgers: HashMap<String, crate::state::LocalLedger>,
     /// Process-wide counters (requests / streams / retries / bytes).
     pub counters: Option<crate::httpd::StaticsSnapshot>,
+    /// Per-endpoint quota-calibration flows (a pending reading and/or a derivation).
+    pub calibrations:
+        HashMap<String, (Option<crate::state::QuotaReading>, Option<crate::state::QuotaCalibration>)>,
     /// When the statistics counters started accumulating (unix seconds).
     ///
     /// The counters are lifetime totals that survive restarts, while the uptime shown next to them
@@ -98,7 +101,17 @@ pub fn load(path: &Path) -> Persisted {
             .get("counters")
             .and_then(crate::httpd::StaticsSnapshot::from_json);
         let stats_since = v.get("stats_since").and_then(|x| x.as_i64()).unwrap_or(0);
-        Some(Persisted { health, stats, ledgers, counters, stats_since })
+        let mut calibrations = HashMap::new();
+        if let Some(xs) = v.get("calibrations").and_then(|x| x.as_object()) {
+            for (name, c) in xs {
+                let reading = c.get("pending").and_then(crate::state::QuotaReading::from_json);
+                let derived = c.get("derived").and_then(crate::state::QuotaCalibration::from_json);
+                if reading.is_some() || derived.is_some() {
+                    calibrations.insert(name.clone(), (reading, derived));
+                }
+            }
+        }
+        Some(Persisted { health, stats, ledgers, counters, stats_since, calibrations })
     };
     match parse(&text) {
         Some(p) => {
@@ -176,6 +189,21 @@ pub fn save(path: &Path, data: &Persisted, now: i64) -> Result<(), String> {
             Value::Null
         },
     );
+    // Calibration flows are stored only where they exist; the common case (a plain pay-as-you-go
+    // endpoint that will never be calibrated) adds nothing to the file.
+    if !data.calibrations.is_empty() {
+        let mut cal = serde_json::Map::new();
+        for (name, (reading, derived)) in &data.calibrations {
+            cal.insert(
+                name.clone(),
+                json!({
+                    "pending": reading.as_ref().map(|r| r.to_json()).unwrap_or(Value::Null),
+                    "derived": derived.as_ref().map(|c| c.to_json()).unwrap_or(Value::Null),
+                }),
+            );
+        }
+        obj.insert("calibrations".to_string(), Value::Object(cal));
+    }
 
     let text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
     let tmp = path.with_extension("json.tmp");
@@ -208,6 +236,7 @@ pub fn snapshot(state: &Arc<crate::proxy::AppState>) -> Persisted {
             Some(counters)
         },
         stats_since: state.stats_since.load(Ordering::Relaxed),
+        calibrations: crate::state::calibration_snapshot(state),
     }
 }
 

@@ -593,11 +593,11 @@ plans:
 }
 
 /// The calibration anchor must describe only the cycle it was taken in. This is the whole reason it
-/// carries an instant: without that bound the correction would be re-applied every cycle, quietly
-/// inventing usage the provider never recorded.
+/// The monthly window sums from the cycle start, so a request from the previous cycle drops out
+/// when the provider resets rather than lingering in a trailing 30-day sum.
 #[test]
-fn a_calibration_anchor_expires_with_its_cycle() {
-    use crate::config::{QuotaCfg, QuotaProbe, QuotaUnit};
+fn a_cycle_window_counts_from_its_own_start() {
+    use crate::config::{QuotaCfg, QuotaUnit};
     use crate::state::{LocalLedger, QuotaState};
 
     let at = |s: &str| timeutil::parse_iso8601(s).unwrap();
@@ -611,39 +611,22 @@ fn a_calibration_anchor_expires_with_its_cycle() {
         ..QuotaCfg::default()
     };
 
-    // The provider's console said 50% on Aug 28, and the router forwarded 20 RMB since.
-    let anchored = QuotaCfg {
-        used_percent: 50.0,
-        used_at: at("2026-08-28T00:00:00Z"),
-        ..cfg.clone()
-    };
     q.ledger = LocalLedger::default();
+    // A request from the previous cycle must not count inside this one.
+    q.ledger.add(at("2026-08-20T00:00:00Z"), 70.0, 0);
     q.ledger.add(at("2026-08-28T00:00:00Z"), 20.0, 0);
-    let r = q.report(at("2026-08-30T00:00:00Z"), 3_600, 80.0, true, 99.0, &anchored);
-    let used = r.monthly.used;
-    assert!((used - 120.0).abs() < 1e-6, "50% of 200 + 20 = 120, got {used}");
-    assert!((r.monthly.pct - 60.0).abs() < 1e-6, "got {}", r.monthly.pct);
+    let r = q.report(at("2026-08-30T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg);
+    assert!((r.monthly.used - 20.0).abs() < 1e-6, "only this cycle's 20 counts, got {}", r.monthly.used);
+    assert!((r.monthly.pct - 10.0).abs() < 1e-6, "got {}", r.monthly.pct);
 
-    // The next cycle starts Sep 26. The Aug 28 reading says nothing about it, so it must not apply,
-    // and the Aug 28 request must not be counted either.
-    let r2 = q.report(at("2026-09-27T00:00:00Z"), 3_600, 80.0, true, 99.0, &anchored);
-    assert_eq!(r2.monthly.used, 0.0, "a stale anchor must not be re-applied");
+    // The cycle end is reported outright, unlike a sliding window which has no reset instant.
+    assert_eq!(r.monthly.resets_at, Some(at("2026-09-26T00:00:00Z")));
 
-    // Within the new cycle the anchor is dead but traffic still counts.
+    // Past the reset the old request is gone, and the new cycle counts from zero.
     q.ledger.add(at("2026-09-27T00:00:00Z"), 30.0, 0);
-    let r3 = q.report(at("2026-09-28T00:00:00Z"), 3_600, 80.0, true, 99.0, &anchored);
-    assert!((r3.monthly.used - 30.0).abs() < 1e-6, "got {}", r3.monthly.used);
-
-    // The cycle end is reported, because unlike a sliding window it is knowable locally.
-    assert_eq!(r3.monthly.resets_at, Some(at("2026-10-26T00:00:00Z")));
-
-    // A genuine 0% reading still counts as data: the user is asserting "the provider says empty",
-    // which is different from "the router has not seen anything".
-    let anchor_zero = QuotaCfg { used_percent: 0.0, ..anchored.clone() };
-    let r4 = q.report(at("2026-08-30T00:00:00Z"), 3_600, 80.0, true, 99.0, &anchor_zero);
-    q.ledger.add(at("2026-08-30T00:00:00Z"), 5.0, 0);
-    let r5 = q.report(at("2026-08-31T00:00:00Z"), 3_600, 80.0, true, 99.0, &anchor_zero);
-    assert!(r5.monthly.used >= r4.monthly.used, "traffic keeps accruing inside the cycle");
+    let r2 = q.report(at("2026-09-28T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg);
+    assert!((r2.monthly.used - 30.0).abs() < 1e-6, "got {}", r2.monthly.used);
+    assert_eq!(r2.monthly.resets_at, Some(at("2026-10-26T00:00:00Z")));
 }
 
 /// Without a cycle the monthly window must keep behaving as the plain 30-day sliding sum it always
@@ -673,93 +656,135 @@ fn a_plan_without_a_cycle_keeps_the_sliding_window() {
     assert!((r2.monthly.used - 40.0).abs() < 1e-6);
 }
 
-/// An anchor with no instant cannot be placed in time, so it would apply to every cycle forever.
+/// The derivation: two console readings around a known amount of forwarded consumption give the
+/// window totals and the true price scale. `scale = monthly * d_pct / (100 * L)`.
 #[test]
-fn a_calibration_without_an_instant_is_refused() {
-    let yaml = r#"
-plans:
-  - name: p1
-    url: https://example.com/v1
-    key: sk-x
-    model: m
-    quota: { unit: rmb, cycle_day: 26, monthly: 200, used_percent: 50 }
-"#;
-    let c = config::parse(yaml, std::path::Path::new("t.yaml")).unwrap();
-    let q = c.find("p1").unwrap();
-    assert_eq!(q.quota.used_percent, 0.0, "an unbounded anchor must not survive");
-    assert!(c.warnings.iter().any(|w| w.contains("used_at")), "{:?}", c.warnings);
-
-    // With an instant it is accepted, and an out-of-range percentage is not.
-    let yaml = yaml.replace("used_percent: 50", "used_percent: 50, used_at: \"2026-08-28T00:00:00Z\"");
-    let c = config::parse(&yaml, std::path::Path::new("t.yaml")).unwrap();
-    let q = c.find("p1").unwrap();
-    assert!((q.quota.used_percent - 50.0).abs() < 1e-9);
-    assert!(q.quota.used_at > 0);
-
-    let yaml = yaml.replace("used_percent: 50", "used_percent: 150");
-    let c = config::parse(&yaml, std::path::Path::new("t.yaml")).unwrap();
-    assert_eq!(c.find("p1").unwrap().quota.used_percent, 0.0);
-    assert!(c.warnings.iter().any(|w| w.contains("outside 0-100")), "{:?}", c.warnings);
-}
-
-/// A calibration instant must never be pushed forward by an unrelated edit. If it were, the
-/// traffic forwarded since the reading would be counted twice: once from the ledger, and once by
-/// an anchor that now claims to have been taken after it.
-#[test]
-fn a_calibration_instant_survives_an_unrelated_edit() {
-    use crate::config::{QuotaCfg, QuotaUnit};
-    use crate::state::{LocalLedger, QuotaState};
+fn two_readings_derive_the_window_totals_and_price_scale() {
+    use crate::state::{LocalLedger, QuotaCalibration, QuotaState};
 
     let at = |s: &str| timeutil::parse_iso8601(s).unwrap();
-    let anchored_at = at("2026-08-28T00:00:00Z");
     let mut q = QuotaState::default();
-    let cfg = QuotaCfg {
-        unit: QuotaUnit::Rmb,
-        monthly: 200.0,
-        cycle_day: 26,
-        used_percent: 50.0,
-        used_at: anchored_at,
-        ..QuotaCfg::default()
-    };
-    // 20 RMB forwarded after the reading, then evaluated later in the same cycle.
     q.ledger = LocalLedger::default();
-    q.ledger.add(anchored_at, 20.0, 0);
-    let used_at_later = q.report(at("2026-09-10T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg).monthly.used;
-    assert!((used_at_later - 120.0).abs() < 1e-6, "50% of 200 plus 20 = 120, got {used_at_later}");
 
-    // Had a save moved the instant to Sep 10, the 20 RMB would drop out of the sum.
-    let moved = QuotaCfg { used_at: at("2026-09-10T00:00:00Z"), ..cfg.clone() };
-    let used_if_moved = q.report(at("2026-09-10T00:00:00Z"), 3_600, 80.0, true, 99.0, &moved).monthly.used;
+    // Prices are entered at their ratio only (the user's 10 / 0.4 / 30 in RMB terms), so the ledger
+    // accumulates "weighted units" that are not yet real money.
+    let t1 = at("2026-08-28T00:00:00Z");
+    let t2 = at("2026-08-29T00:00:00Z");
+    // 4 weighted units inside [t1, t2); the sample at t2 falls in the next window.
+    q.ledger.add(t1, 4.0, 1000);
+    q.ledger.add(t2, 20.0, 5000);
+
+    // The console moved the monthly window from 32.00% to 44.00% over that window.
+    let monthly = 200.0f64;
+    let d_month = 44.0 - 32.0;
+    // `cost_between` is half-open [t1, t2): the request stamped exactly at t1 was forwarded after
+    // that reading was taken, while one exactly at t2 belongs to the next window. Summing the two
+    // ends openly would double-count a boundary sample.
+    let l = q.ledger.cost_between(t1, t2);
+    assert!((l - 4.0).abs() < 1e-9, "only the t1 sample is inside, got {l}");
+    let scale = monthly * d_month / (100.0 * l);
+    // 12% of 200 = 24 true yuan over 4 weighted units: the entered prices were 4/24 of the truth.
+    assert!((scale - 6.0).abs() < 1e-9, "got {scale}");
+
+    // Same window, console said 1.0% -> 1.5%: total_5h = scale * L * 100 / d_pct.
+    let d_5h = 1.5 - 1.0;
+    let rolling_total = scale * l * 100.0 / d_5h;
+    assert!((rolling_total - 4800.0).abs() < 1e-6, "got {rolling_total}");
+
+    // Rescaling the ledger must convert every recorded amount, including ones outside the window.
+    q.ledger.scale(scale);
+    assert!((q.ledger.cost_between(t1, t2) - 24.0).abs() < 1e-9, "the window rescaled");
     assert!(
-        (used_if_moved - 100.0).abs() < 1e-6,
-        "the counterfactual must lose the 20: got {used_if_moved}"
+        (q.ledger.total_cost - 24.0 * scale).abs() < 1e-9,
+        "the whole history rescaled too, got {}",
+        q.ledger.total_cost
     );
-    assert!(
-        used_at_later > used_if_moved,
-        "keeping the original instant must retain the intermediate traffic"
-    );
+
+    // A calibration with no usable bucket resets reports no total rather than a wrong one.
+    let cal = QuotaCalibration { scale, rolling_total, weekly_total: 0.0, ..Default::default() };
+    q.calibration = Some(cal);
+    let report = q.report(t2, 3_600, 80.0, true, 99.0, &crate::config::QuotaCfg::default());
+    let v = q.to_json(t2, &report, "RMB");
+    assert_eq!(v["calibration"]["derived"]["scale"], 6.0);
+    assert_eq!(v["calibration"]["derived"]["rolling_total"], 4800.0);
 }
 
-/// An instant in the future cannot describe a reading, and the report only honours anchors at or
-/// before now, so it would sit in the config looking active while doing nothing.
+/// A bucket's local percentage must line up with the provider's console, which means summing from
+/// the bucket's own start rather than from a trailing five hours.
 #[test]
-fn a_future_calibration_instant_is_rejected() {
-    let future = crate::util::now_secs() + 86_400;
-    let yaml = format!(
-        r#"
-plans:
-  - name: p1
-    url: https://example.com/v1
-    key: sk-x
-    model: m
-    quota: {{ unit: rmb, cycle_day: 26, monthly: 200, used_percent: 50, used_at: {future} }}
-"#
-    );
-    let c = config::parse(&yaml, std::path::Path::new("t.yaml")).unwrap();
-    let q = c.find("p1").unwrap();
-    assert_eq!(q.quota.used_percent, 0.0, "a future anchor must be dropped");
-    assert_eq!(q.quota.used_at, 0);
-    assert!(c.warnings.iter().any(|w| w.contains("future")), "{:?}", c.warnings);
+fn a_derived_bucket_reports_from_its_own_start() {
+    use crate::state::{LocalLedger, QuotaCalibration, QuotaState};
+
+    let at = |s: &str| timeutil::parse_iso8601(s).unwrap();
+    let mut q = QuotaState::default();
+    q.ledger = LocalLedger::default();
+    let now = at("2026-08-28T03:00:00Z");
+    // The console said this bucket resets in 2 hours, so it started 3 hours ago.
+    let reset = now + 2 * 3600;
+    let total = 100.0f64;
+    // 30 spent inside the bucket, 50 only an hour before it began (must not count).
+    q.ledger.add(reset - 5 * 3600 - 3600, 50.0, 0);
+    q.ledger.add(reset - 3600, 30.0, 0);
+
+    q.calibration = Some(QuotaCalibration {
+        scale: 1.0,
+        rolling_total: total,
+        weekly_total: 0.0,
+        bucket_5h: reset,
+        ..Default::default()
+    });
+    let report = q.report(now, 3_600, 80.0, true, 99.0, &crate::config::QuotaCfg::default());
+    let v = q.to_json(now, &report, "RMB");
+    assert_eq!(v["rolling"]["used"], 30.0, "only the in-bucket sample counts");
+    assert_eq!(v["rolling"]["percent"], 30.0);
+    assert_eq!(v["rolling"]["limit"], total);
+    // The bucket rolls forward by whole periods, so a later read still finds a future reset.
+    let later = reset + 3600;
+    let report2 = q.report(later, 3_600, 80.0, true, 99.0, &crate::config::QuotaCfg::default());
+    let v2 = q.to_json(later, &report2, "RMB");
+    assert_eq!(v2["rolling"]["resets_at"], timeutil::iso8601(reset + 5 * 3600).as_str());
+}
+
+/// Calibration state must survive a restart: the wizard spans a consumption window that can
+/// outlive the process.
+#[test]
+fn calibration_state_round_trips_through_the_state_file() {
+    use crate::state::{QuotaCalibration, QuotaReading};
+
+    let reading = QuotaReading {
+        at: 1_700_000_000,
+        pct_5h: 1.5,
+        pct_week: 0.25,
+        pct_month: 32.0,
+        cd_5h: 3600,
+        cd_week: 86_400,
+        cd_month: 604_800,
+    };
+    let j = reading.to_json();
+    let back = QuotaReading::from_json(&j).unwrap();
+    assert_eq!(back.at, reading.at);
+    assert_eq!(back.pct_month, 32.0);
+    assert_eq!(back.cd_week, 86_400);
+
+    let cal = QuotaCalibration {
+        calibrated_at: 1_700_100_000,
+        scale: 1.2,
+        rolling_total: 4800.0,
+        weekly_total: 12_000.0,
+        bucket_5h: 1_700_103_600,
+        week_reset: 1_700_600_000,
+        verified_at: 1_700_200_000,
+        residual_pp: 0.03,
+        ref_pct_month: 44.0,
+        ref_at: 1_700_200_000,
+    };
+    let j = cal.to_json();
+    let back = QuotaCalibration::from_json(&j).unwrap();
+    assert!((back.scale - 1.2).abs() < 1e-9);
+    assert_eq!(back.rolling_total, 4800.0);
+    assert_eq!(back.bucket_5h, cal.bucket_5h);
+    assert_eq!(back.verified_at, cal.verified_at);
+    assert!((back.ref_pct_month - 44.0).abs() < 1e-9);
 }
 
 // ------------------------------------------------------------------ quota unit reporting

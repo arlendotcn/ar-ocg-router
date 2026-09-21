@@ -87,12 +87,9 @@ plans:
     # 订阅套餐（如火山方舟 Coding / Agent Plan）每期把额度重置为满额，重置日 = 购买日。
     # 配 cycle_day 后月窗口按「本周期累计」算，控制台也能显示与厂商一致的重置倒计时。
     # 不配（或 0）= 月窗口按 30 天滚动累计（按量计费端点用这个）。
-    # 若这个 key 还被别的工具用、或配置前已花掉一部分，可用 used_percent + used_at 校准：
-    # 前者填后台显示的已用百分比，后者是读到该值的时刻（控制台会自动填现在）。
-    # 校准值只在当前周期有效，跨周期自动失效。详见 docs/configuration-zh.md。
-    # cycle_day: 26
-    # used_percent: 43.5
-    # used_at: 1767225600
+    # 没有用量接口的套餐（如火山 Coding Plan），可用控制台「额度校准」向导推算真实额度：
+    # 抄两次后台百分比（中间用一段时间），即可推得各窗口总额与真实单价，自动写回 prices。
+    # 详见 docs/configuration-zh.md。
     # 可选：给该端点的 max_output_tokens 设上限。有些上游（如火山方舟）超过自己的上限时会
     # 回一句不点名参数的 "a parameter specified in the request is not valid"，而客户端常按
     # 上下文窗口的整数倍索要（例如 384000）。设了上限就按上限发，超出部分写日志。

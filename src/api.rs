@@ -129,6 +129,13 @@ pub fn handle(state: &Arc<AppState>, req: &Request, out: &mut Responder) -> bool
                 if let Some(name) = rest.strip_suffix("/duplicate") {
                     return duplicate_endpoint(state, req, out, name);
                 }
+                if let Some(name) = rest.strip_suffix("/calibrate") {
+                    if req.method == "POST" {
+                        return calibrate_endpoint(state, req, out, name);
+                    }
+                    error_response(req, out, 405, "method not allowed");
+                    return true;
+                }
             }
             if let Some(name) = path.strip_prefix("/api/test/") {
                 test_endpoint(state, req, out, name);
@@ -228,8 +235,6 @@ fn account_cfg_json(a: &AccountCfg) -> Value {
             "probe": a.quota.probe.as_str(),
             "refresh_secs": a.quota.refresh_secs,
             "cycle_day": a.quota.cycle_day,
-            "used_percent": a.quota.used_percent,
-            "used_at": a.quota.used_at,
         },
         "enabled": a.is_enabled(),
     })
@@ -598,11 +603,6 @@ fn endpoint_yaml(
     if cycle_day > 0 {
         s.push_str(&format!(", cycle_day: {}", cycle_day));
     }
-    let used_percent = num_at(&q, "used_percent").unwrap_or(0.0);
-    let used_at = int_at(&q, "used_at").unwrap_or(0);
-    if used_percent > 0.0 && used_at > 0 {
-        s.push_str(&format!(", used_percent: {}, used_at: {}", used_percent, used_at));
-    }
     s.push_str(" }\n");
     let drop: Vec<String> = e
         .get("drop_params")
@@ -968,6 +968,271 @@ fn duplicate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
             json_response(req, out, 200, &json!({"source": name, "name": candidate, "reloaded": reloaded}));
         }
         Err(e) => error_response(req, out, 500, &e),
+    }
+    true
+}
+
+// ------------------------------------------------------------------- plan preview
+
+/// Minimum percentage-point movement between the two calibration readings. The provider's console
+/// quantises its percentages, and a window this narrow would amplify the rounding into a wildly
+/// wrong derived total.
+const CALIBRATE_MIN_DELTA_PP: f64 = 0.3;
+/// How close a verification reading must land to the prediction, in percentage points, before the
+/// derivation counts as verified.
+const CALIBRATE_VERIFY_TOLERANCE_PP: f64 = 0.5;
+
+fn reading_from_body(doc: &Value) -> Result<crate::state::QuotaReading, String> {
+    let pct = |k: &str| -> Result<f64, String> {
+        let p = num_at(doc, k).unwrap_or(0.0);
+        if !(0.0..=100.0).contains(&p) {
+            return Err(format!("{}.pct must be within 0-100", k));
+        }
+        Ok(p)
+    };
+    Ok(crate::state::QuotaReading {
+        at: crate::util::now_secs(),
+        pct_5h: pct("pct_5h")?,
+        pct_week: pct("pct_week")?,
+        pct_month: pct("pct_month")?,
+        cd_5h: int_at(doc, "cd_5h").unwrap_or(0).max(0),
+        cd_week: int_at(doc, "cd_week").unwrap_or(0).max(0),
+        cd_month: int_at(doc, "cd_month").unwrap_or(0).max(0),
+    })
+}
+
+/// POST /api/endpoints/<name>/calibrate - derive a no-usage-API plan's real allowance.
+///
+/// The plan's console shows only percentages, and the router only sees the traffic it forwarded.
+/// Two percentage readings taken around a known amount of forwarded consumption pin down the ratio
+/// between them, which yields the window's total allowance - and, anchored on the plan price
+/// (`quota.monthly`), the true per-token value of input, cache and output.
+///
+/// Stages: `start` records the first reading; `finish` records the second, derives, rescales the
+/// ledger and the configured prices into true money; `verify` compares a third reading with the
+/// prediction and flags the derivation as proven when it lands close enough; `cancel` discards a
+/// pending first reading.
+fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder, name: &str) -> bool {
+    let doc = body_json(req).unwrap_or(Value::Null);
+    let stage = str_at(&doc, "stage").unwrap_or("").to_string();
+    let cfg = state.cfg();
+    let Some(acc_cfg) = cfg.accounts.iter().find(|a| a.name == name).cloned() else {
+        error_response(req, out, 404, &format!("unknown endpoint {:?}", name));
+        return true;
+    };
+    let Some(rt) = state.registry.all().into_iter().find(|r| r.name == name) else {
+        error_response(req, out, 404, &format!("unknown endpoint {:?}", name));
+        return true;
+    };
+    match stage.as_str() {
+        "cancel" => {
+            rt.clear_reading();
+            rt.clear_calibration();
+            crate::persist::mark_dirty();
+            json_response(req, out, 200, &json!({"cancelled": true}));
+        }
+        "start" => {
+            let reading = match reading_from_body(&doc) {
+                Ok(r) => r,
+                Err(e) => {
+                    error_response(req, out, 400, &e);
+                    return true;
+                }
+            };
+            rt.set_reading(reading);
+            crate::persist::mark_dirty();
+            log_info!("[{}] calibration reading 1 recorded", name);
+            json_response(req, out, 200, &json!({"stage": "start", "recorded": true}));
+        }
+        "finish" => {
+            // Peek, not take: every validation failure below must leave the reading in place, or a
+            // rejected finish would silently discard the user's first reading.
+            let Some(r1) = rt.peek_reading() else {
+                error_response(req, out, 409, "no pending first reading; run stage=start first");
+                return true;
+            };
+            let r2 = match reading_from_body(&doc) {
+                Ok(r) => r,
+                Err(e) => {
+                    error_response(req, out, 400, &e);
+                    return true;
+                }
+            };
+            let (t1, t2) = (r1.at, r2.at);
+            if t2 <= t1 {
+                error_response(req, out, 400, "the second reading must come after the first");
+                return true;
+            }
+            // Both readings must sit in one subscription cycle: across a reset the percentage
+            // starts over and the delta no longer means consumed/total.
+            let cycle_day = acc_cfg.quota.cycle_day;
+            if cycle_day >= 1 {
+                let b1 = crate::timeutil::cycle_bounds(t1, cycle_day).0;
+                let b2 = crate::timeutil::cycle_bounds(t2, cycle_day).0;
+                if b1 != b2 {
+                    error_response(
+                        req,
+                        out,
+                        409,
+                        "the readings span a subscription reset; take both inside one cycle",
+                    );
+                    return true;
+                }
+            }
+            let l = rt.quota.lock().map(|q| q.ledger.cost_between(t1, t2)).unwrap_or(0.0);
+            if l <= 0.0 {
+                error_response(
+                    req,
+                    out,
+                    409,
+                    "no consumption was recorded between the readings; use the endpoint, then record the second reading",
+                );
+                return true;
+            }
+            let d_month = r2.pct_month - r1.pct_month;
+            if d_month < CALIBRATE_MIN_DELTA_PP {
+                error_response(
+                    req,
+                    out,
+                    409,
+                    &format!(
+                        "the monthly percentage moved only {:.2} points; at least {:.1} are needed to outpace the console's rounding",
+                        d_month, CALIBRATE_MIN_DELTA_PP
+                    ),
+                );
+                return true;
+            }
+            // consumed_true = monthly * d_month/100 = scale * L  =>  scale = monthly * d_month / (100*L)
+            let scale = acc_cfg.quota.monthly * d_month / (100.0 * l);
+            if !scale.is_finite() || scale <= 0.0 {
+                error_response(req, out, 500, "derived a non-usable scale factor; check the configured prices");
+                return true;
+            }
+            // A window whose readings span one of its own resets says nothing about its total, so
+            // such a window is skipped rather than derived from broken numbers.
+            let crossed = |cd1: i64, window: i64| -> bool {
+                if cd1 > 0 {
+                    t2 - t1 > cd1
+                } else {
+                    t2 - t1 >= window
+                }
+            };
+            let d_5h = r2.pct_5h - r1.pct_5h;
+            let rolling_total = if crossed(r1.cd_5h, crate::state::PERIOD_ROLLING) || d_5h < CALIBRATE_MIN_DELTA_PP {
+                0.0
+            } else {
+                scale * l * 100.0 / d_5h
+            };
+            let d_week = r2.pct_week - r1.pct_week;
+            let weekly_total = if crossed(r1.cd_week, crate::state::PERIOD_WEEKLY) || d_week < CALIBRATE_MIN_DELTA_PP {
+                0.0
+            } else {
+                scale * l * 100.0 / d_week
+            };
+            // Convert the whole ledger into true money, then correct the configured prices the same
+            // way: both must describe the same consumption in the same unit from here on.
+            if let Ok(mut q) = rt.quota.lock() {
+                q.ledger.scale(scale);
+            }
+            let mut all = cfg.accounts.clone();
+            if let Some(idx) = all.iter().position(|a| a.name == name) {
+                let p = &mut all[idx].prices;
+                p.input *= scale;
+                p.output *= scale;
+                p.cached_input *= scale;
+            }
+            let cal = crate::state::QuotaCalibration {
+                calibrated_at: t2,
+                scale,
+                rolling_total,
+                weekly_total,
+                bucket_5h: if r2.cd_5h > 0 { t2 + r2.cd_5h } else { 0 },
+                week_reset: if r2.cd_week > 0 { t2 + r2.cd_week } else { 0 },
+                verified_at: 0,
+                residual_pp: 0.0,
+                ref_pct_month: r2.pct_month,
+                ref_at: t2,
+            };
+            // The derivation succeeded: now, and only now, the pending reading is consumed.
+            rt.clear_reading();
+            rt.set_calibration(cal.clone());
+            let saved = persist_accounts(state, &all, "pre-calibrate");
+            let reloaded = match state.reload() {
+                Ok(_) => true,
+                Err(e) => {
+                    log_warn!("calibration written but reload failed: {}", e);
+                    false
+                }
+            };
+            log_info!(
+                "[{}] calibration derived: scale={:.4} rolling_total={:.2} weekly_total={:.2}",
+                name, scale, rolling_total, weekly_total
+            );
+            json_response(
+                req,
+                out,
+                200,
+                &json!({
+                    "stage": "finish",
+                    "scale": scale,
+                    "rolling_total": rolling_total,
+                    "weekly_total": weekly_total,
+                    "saved_prices": saved.is_ok(),
+                    "reloaded": reloaded,
+                    "note": if rolling_total == 0.0 || weekly_total == 0.0 {
+                        "a window was skipped: its readings spanned a reset or moved too little"
+                    } else { "" },
+                }),
+            );
+        }
+        "verify" => {
+            let Some(cal) = rt.calibration() else {
+                error_response(req, out, 409, "nothing to verify; run the calibration first");
+                return true;
+            };
+            let Some(pct3) = num_at(&doc, "pct_month") else {
+                error_response(req, out, 400, "pct_month is required");
+                return true;
+            };
+            if !(0.0..=100.0).contains(&pct3) {
+                error_response(req, out, 400, "pct_month must be within 0-100");
+                return true;
+            }
+            let t3 = crate::util::now_secs();
+            // Compare deltas, not absolutes: the absolute percentage also contains consumption from
+            // before the router started counting, which the ledger cannot see. The delta between
+            // two readings is pure forwarded traffic, which it can predict exactly.
+            let l = rt.quota.lock().map(|q| q.ledger.cost_between(cal.ref_at, t3)).unwrap_or(0.0);
+            let predicted = cal.scale * l / acc_cfg.quota.monthly * 100.0;
+            let actual_delta = pct3 - cal.ref_pct_month;
+            let residual = actual_delta - predicted;
+            let verified = residual.abs() <= CALIBRATE_VERIFY_TOLERANCE_PP;
+            let mut cal = cal;
+            cal.verified_at = if verified { t3 } else { 0 };
+            cal.residual_pp = residual;
+            // The verified reading becomes the next reference, so repeated checks each measure one
+            // short window instead of accumulating error since the original calibration.
+            cal.ref_pct_month = pct3;
+            cal.ref_at = t3;
+            rt.set_calibration(cal.clone());
+            crate::persist::mark_dirty();
+            log_info!(
+                "[{}] calibration verification: predicted={:.3}pp actual={:.3}pp residual={:.3}pp verified={}",
+                name, predicted, actual_delta, residual, verified
+            );
+            json_response(
+                req,
+                out,
+                200,
+                &json!({
+                    "stage": "verify",
+                    "predicted_pp": predicted,
+                    "residual_pp": residual,
+                    "verified": verified,
+                }),
+            );
+        }
+        _ => error_response(req, out, 400, "stage must be start, finish, verify or cancel"),
     }
     true
 }

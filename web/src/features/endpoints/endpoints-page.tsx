@@ -40,8 +40,6 @@ const BLANK: EndpointCfg = {
     probe: "none",
     refresh_secs: 300,
     cycle_day: 0,
-    used_percent: 0,
-    used_at: 0,
   },
   enabled: true,
 };

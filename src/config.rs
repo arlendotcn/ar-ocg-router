@@ -230,24 +230,6 @@ pub struct QuotaCfg {
     /// A month too short for the anchor uses that month's last day (Jan 31 -> Feb 28), which is the
     /// provider's own rule rather than a workaround.
     pub cycle_day: u32,
-    /// Percentage the provider's console showed as of `used_at`. 0 = no anchor (pure local
-    /// accounting).
-    ///
-    /// The router only sees the traffic it forwarded, so a plan that was already partly spent - by
-    /// another tool, or before the endpoint was configured - would read as unused. This pair says
-    /// "at instant X the provider said Y%", and the local figure becomes
-    /// `Y% of the limit + everything the router forwarded since X`.
-    ///
-    /// A percentage rather than an amount because that is what the provider's console shows: the
-    /// user copies one number instead of converting it, and the conversion (percentage of a limit
-    /// the config already states) is arithmetic the router can do exactly.
-    ///
-    /// The instant is not bookkeeping: it is the whole reason the correction expires by itself. An
-    /// anchor from a previous cycle is ignored, so the number cannot leak into the next billing
-    /// period, and re-calibrating mid-cycle is just editing the pair again.
-    pub used_percent: f64,
-    /// Unix seconds the `used_percent` reading was taken. 0 = unset (anchor ignored).
-    pub used_at: i64,
 }
 
 impl Default for QuotaCfg {
@@ -261,8 +243,6 @@ impl Default for QuotaCfg {
             probe: QuotaProbe::None,
             refresh_secs: 300,
             cycle_day: 0,
-            used_percent: 0.0,
-            used_at: 0,
         }
     }
 }
@@ -755,20 +735,6 @@ fn yfloat(v: &Y, default: f64) -> f64 {
         Y::String(s) => s.trim().parse().unwrap_or(default),
         _ => default,
     }
-}
-
-/// A calibration instant, written as unix seconds or an ISO-8601 string. The console writes unix
-/// seconds (it knows the clock); a hand-edited config may use either.
-fn parse_used_at(v: &Y) -> Option<i64> {
-    match v {
-        Y::String(s) => {
-            let t = s.trim();
-            crate::timeutil::parse_iso8601(t).or_else(|| t.parse::<i64>().ok())
-        }
-        Y::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
-        _ => None,
-    }
-    .filter(|ts| *ts > 0)
 }
 
 /// Split a scalar or sequence into trimmed tokens (comma / space / semicolon / pipe).
@@ -1297,47 +1263,6 @@ pub fn parse(raw: &str, path: &Path) -> Result<Config, String> {
                                 key, idx, d, quota.cycle_day
                             ));
                         }
-                    }
-                    if let Some(x) = yget_any(qm, &["used_percent", "used_pct", "used"]) {
-                        let p = yfloat(x, 0.0);
-                        if !(0.0..=100.0).contains(&p) && p != 0.0 {
-                            warnings.push(format!(
-                                "{}[{}].quota.used_percent {} is outside 0-100, ignoring the anchor",
-                                key, idx, p
-                            ));
-                            quota.used_percent = 0.0;
-                        } else {
-                            quota.used_percent = p;
-                        }
-                    }
-                    if let Some(x) = yget_any(qm, &["used_at", "used_since", "as_of"]) {
-                        match parse_used_at(x) {
-                            Some(ts) => quota.used_at = ts,
-                            None => warnings.push(format!(
-                                "{}[{}].quota.used_at is not an ISO-8601 timestamp or unix seconds, ignoring the anchor",
-                                key, idx
-                            )),
-                        }
-                    }
-                    // An anchor without an instant cannot be placed in time, so the ledger could not
-                    // be split around it and the correction would apply forever. Refuse it loudly.
-                    if quota.used_percent > 0.0 && quota.used_at == 0 {
-                        warnings.push(format!(
-                            "{}[{}].quota.used_percent is set without used_at, so it cannot be bounded to a cycle; ignoring it",
-                            key, idx
-                        ));
-                        quota.used_percent = 0.0;
-                    }
-                    // An instant in the future is not a reading anyone could have taken, and the
-                    // report only honours anchors at or before "now", so it would sit in the config
-                    // looking active while doing nothing. Say so instead.
-                    if quota.used_at > crate::util::now_secs() {
-                        warnings.push(format!(
-                            "{}[{}].quota.used_at is in the future, so the calibration cannot apply; ignoring it",
-                            key, idx
-                        ));
-                        quota.used_percent = 0.0;
-                        quota.used_at = 0;
                     }
                     // tokens are a plain count: keep them integral-ish but allow floats
                     if quota.unit == QuotaUnit::Tokens {

@@ -119,10 +119,6 @@ fn quota_map(q: &QuotaCfg) -> Y {
     if q.has_cycle() {
         m.push(("cycle_day", yu64(q.cycle_day as u64)));
     }
-    if q.used_percent > 0.0 && q.used_at > 0 {
-        m.push(("used_percent", yfloat(q.used_percent)));
-        m.push(("used_at", yi64(q.used_at)));
-    }
     ymap(m)
 }
 
@@ -549,8 +545,6 @@ plans:
       probe: usage
       refresh_secs: 45
       cycle_day: 26
-      used_percent: 42.5
-      used_at: 1756339200
   - name: plan-two
     url: https://plan.example.com/v1
     key: sk-plan-two
@@ -702,8 +696,6 @@ fallback:
             assert_eq!(got.quota.monthly, want.quota.monthly);
             assert_eq!(got.quota.refresh_secs, want.quota.refresh_secs);
             assert_eq!(got.quota.cycle_day, want.quota.cycle_day);
-            assert_eq!(got.quota.used_percent, want.quota.used_percent);
-            assert_eq!(got.quota.used_at, want.quota.used_at);
             assert_eq!(got.inject_session, want.inject_session);
             assert_eq!(got.drop_params, want.drop_params);
         }

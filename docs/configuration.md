@@ -97,7 +97,6 @@ endpoint from being used as a failure fallback.
 | `quota.probe` | `usage` (provider usage API), `balance` (account balance), `none` (local ledger only). |
 | `quota.rolling` / `weekly` / `monthly` | Window limits in the configured unit. OpenCode Go's built-in default is the **non-promotional** grant: 3 / 7.5 / 15 USD (the 20% / 50% / 100% shape of a $15 month). A promotion raises the grant, not its shape, so write the promotional numbers in the config next to the endpoint — a compiled-in default would silently misreport quota the day a promotion starts or ends. |
 | `quota.cycle_day` | The **reset day** (1–31) of a subscription plan, i.e. the day it was bought. Unset or `0` = no reset, and the monthly window is a plain 30-day sliding sum (what pay-as-you-go endpoints want). See below. |
-| `quota.used_percent` + `quota.used_at` | Calibrate the local ledger against the percentage the provider's console shows. See below. |
 | `quota.refresh_secs` | Probe interval. Default 60s for `usage`, 300s for `balance`. |
 
 When no probe is available the router falls back to a local ledger (accumulated cost or tokens
@@ -125,31 +124,26 @@ boundary is derived from the anchor day, so the reset instant is **knowable loca
 sliding window never provided. That is why the console can now show a reset countdown and a
 projection that agree with the provider's own screen.
 
-### Calibration: making the local figure match the console
+### Calibration: deriving the real allowance from two readings
 
-The router only sees traffic **it forwarded itself**. If the same key is also used by other tools,
-or was already partly spent before the endpoint was configured, the local percentage is bound to
-read low. One calibration closes the gap:
+The router only sees traffic **it forwarded itself**, and a plan without a usage API starts its
+local ledger from zero while the provider's console already shows a consumed percentage. The
+console's calibration wizard closes that gap with **two readings**:
 
-```yaml
-quota: { ..., cycle_day: 26, used_percent: 43.5, used_at: 1767225600 }
-```
+1. Copy the three window percentages from the provider's console;
+2. use the endpoint normally for a while, so the router accumulates consumption;
+3. copy the percentages again.
 
-This reads "at `used_at`, the provider's console showed 43.5%". Used in the current cycle =
-`43.5% x limit + everything the router forwarded since used_at`.
+The percentage-point movement between the two readings corresponds to the consumption the router
+actually forwarded. That ratio, anchored on the plan price (the monthly limit), yields each
+window's real total allowance and the true per-token value of input, cache and output - which is
+written back into `prices`, so the local ledger reads true money instead of ratios.
 
-It is a **percentage** rather than an amount because that is what the console shows: you copy one
-number and the router does the conversion.
-
-`used_at` is not bookkeeping overhead - it is the **bound** on the calibration. Without it the
-percentage would be added to every cycle, inventing usage the provider never recorded. With it, the
-calibration expires on its own when the next cycle starts, which is exactly the wanted behaviour, so
-you never clear it by hand. A percentage supplied without an instant is refused with a warning,
-because it could never expire.
-
-> **Limit**: the figure only stays accurate if this key is used by the router **alone**. Share the key
-> and the difference re-accumulates over time; no configuration can repair that.
-
+The derivation is reused across billing cycles until the plan or the coefficients change. A third
+reading verifies it: the gap between the prediction and the console is non-router traffic or a
+coefficient error. Both readings must fall inside one subscription cycle, and the monthly window
+must move at least 0.3 percentage points (below that the console's rounding would swamp the
+derivation, and it is refused).
 ### Per-token prices, and why there are no "deduction coefficients"
 
 An endpoint may declare what it charges:

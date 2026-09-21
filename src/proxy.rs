@@ -292,8 +292,6 @@ fn stats_json(state: &Arc<AppState>) -> Value {
     let now = util::now_secs();
     let sched = timeutil::eval_schedule(now, &cfg.router.peak_windows);
     let mut acc_json = Vec::new();
-    // currency -> (saved, spent)
-    let mut savings: std::collections::BTreeMap<String, (f64, f64)> = std::collections::BTreeMap::new();
     for acc in accounts.iter() {
         let report = acc.rt.quota_report(now, &cfg, &acc.cfg.quota);
         let mut v = acc.rt.to_json(now, &acc.cfg, &report);
@@ -322,32 +320,7 @@ fn stats_json(state: &Arc<AppState>) -> Value {
             obj.insert("enabled".to_string(), json!(acc.cfg.is_enabled()));
         }
         acc_json.push(v);
-        let s = acc.rt.stats.lock().map(|x| x.clone()).unwrap_or_default();
-        // Grouped by the endpoint's own currency. Adding a dollar figure to a yuan figure would
-        // produce a number that is not money in any currency, and the two providers' prices are not
-        // a currency pair to convert between.
-        let cur = acc.cfg.prices.currency.clone();
-        let key = if cur.is_empty() { "UNSPECIFIED".to_string() } else { cur };
-        let slot = savings.entry(key).or_insert((0.0f64, 0.0f64));
-        slot.0 += s.saved_usd;
-        if acc.kind() == AccountKind::Cash {
-            slot.1 += s.cost_usd;
-        }
     }
-    let savings_json: Value = Value::Object(
-        savings
-            .into_iter()
-            .map(|(cur, (saved, spent))| {
-                (
-                    cur,
-                    json!({
-                        "saved": (saved * 1e6).round() / 1e6,
-                        "spent": (spent * 1e6).round() / 1e6,
-                    }),
-                )
-            })
-            .collect(),
-    );
     let since = state.stats_since.load(Ordering::Relaxed);
     json!({
         "router": {
@@ -392,7 +365,6 @@ fn stats_json(state: &Arc<AppState>) -> Value {
             "cash_used": state.statics.cash_used.load(Ordering::Relaxed),
             "bytes_out": state.statics.body_bytes_out.load(Ordering::Relaxed),
         },
-        "savings": savings_json,
         "accounts": acc_json,
         "warnings": cfg.warnings,
     })

@@ -121,6 +121,16 @@ export const api = {
       newName ? { new_name: newName } : {},
     ),
 
+  /**
+   * Derive a no-usage-API plan's real allowance from two console readings.
+   *
+   * The provider only shows percentages and the router only sees its own traffic; two readings
+   * around a known amount of forwarded consumption pin the ratio between them, which yields the
+   * window totals and - anchored on the plan price - the true per-token value.
+   */
+  calibrate: (name: string, body: Record<string, unknown>) =>
+    call<CalibrationResult>("POST", `/api/endpoints/${encodeURIComponent(name)}/calibrate`, body),
+
   backups: () => call<{ backups: BackupEntry[] }>("GET", "/api/backups"),
   createBackup: (tag?: string) => call<BackupEntry>("POST", "/api/backups", tag ? { tag } : {}),
   restoreBackup: (name: string) => call<{ restored: string; reloaded: boolean }>("POST", `/api/backups/${encodeURIComponent(name)}/restore`, {}),
@@ -142,4 +152,22 @@ export type BackupEntry = {
   bytes: number;
   created_at: string;
   age_secs: number;
+};
+
+/** What a calibration stage answered. The shape varies by stage, so all fields are optional. */
+export type CalibrationResult = {
+  stage?: "start" | "finish" | "verify" | "cancel";
+  recorded?: boolean;
+  cancelled?: boolean;
+  /** finish: multiplier derived for the prices and the ledger. */
+  scale?: number;
+  rolling_total?: number;
+  weekly_total?: number;
+  saved_prices?: boolean;
+  reloaded?: boolean;
+  note?: string;
+  /** verify: predicted movement of the monthly percentage vs what the console actually showed. */
+  predicted_pp?: number;
+  residual_pp?: number;
+  verified?: boolean;
 };

@@ -31,6 +31,11 @@ export type Quota = {
     weekly: number;
     monthly: number;
   };
+  /** The calibration wizard's state: a first reading awaiting its second, and/or a derivation. */
+  calibration: {
+    pending: QuotaReading | null;
+    derived: QuotaCalibration | null;
+  };
   last_error: string | null;
 };
 
@@ -119,8 +124,6 @@ export type Stats = {
     cash_used: number;
     bytes_out: number;
   };
-  /** Grouped by currency: adding a dollar figure to a yuan one yields money in no currency. */
-  savings: Record<string, { saved: number; spent: number }>;
   accounts: Account[];
   warnings: string[];
   ui?: { managed: boolean; path_locked: boolean };
@@ -139,10 +142,39 @@ export type QuotaCfg = {
    * its whole allowance reset on the 26th, which a sliding sum cannot express.
    */
   cycle_day: number;
-  /** Percentage the provider's console showed as of `used_at`; 0 = no calibration. */
-  used_percent: number;
-  /** Unix seconds `used_percent` was read at. 0 = unset (the calibration is ignored). */
-  used_at: number;
+};
+
+/** One reading of the provider console's percentages, plus its "resets in ..." countdowns. */
+export type QuotaReading = {
+  at: number;
+  pct_5h: number;
+  pct_week: number;
+  pct_month: number;
+  /** Countdowns in seconds the console printed beside each window; 0 = not noted. */
+  cd_5h: number;
+  cd_week: number;
+  cd_month: number;
+};
+
+/**
+ * What a pair of readings proved about a plan, in true money (the plan price anchors it).
+ *
+ * `rolling_total`/`weekly_total` are display-only: the 5-hour and weekly buckets stay out of the
+ * routing decision, because the upstream answers 40x on its own when a bucket runs dry and the
+ * failover path handles that.
+ */
+export type QuotaCalibration = {
+  calibrated_at: number;
+  /** Multiplier applied to the configured prices and the whole ledger to make them true money. */
+  scale: number;
+  rolling_total: number;
+  weekly_total: number;
+  bucket_5h: number;
+  week_reset: number;
+  verified_at: number | null;
+  residual_pp: number | null;
+  ref_pct_month: number;
+  ref_at: number;
 };
 
 export type EndpointCfg = {
