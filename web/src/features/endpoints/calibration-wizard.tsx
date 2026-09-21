@@ -64,15 +64,25 @@ function CountdownInput({
 }
 
 /**
- * Remaining seconds until an absolute anchor.
+ * Remaining seconds until the anchor's NEXT reset.
  *
  * The stored anchors are immediate instants (the console's countdown resolved at the moment it was
  * entered), not durations. Feeding one straight into the boxes showed days-since-1970: the field
  * must display how long is left, and send the re-entered duration back.
+ *
+ * An anchor in the past rolls forward by whole periods rather than clamping to zero: the provider
+ * did reset, and the next reset is one period away, so the boxes keep showing a live countdown
+ * instead of going blank the moment a bucket boundary is crossed. Saving without changes re-anchors
+ * to that same instant, so it is a no-op.
  */
-function remainingSeconds(anchor: number): number {
+function remainingSeconds(anchor: number, period: number): number {
   if (anchor <= 0) return 0;
-  return Math.max(0, anchor - Math.floor(Date.now() / 1000));
+  const now = Math.floor(Date.now() / 1000);
+  let reset = anchor;
+  while (reset <= now) {
+    reset += period;
+  }
+  return Math.max(0, reset - now);
 }
 
 /** The wizard's live state comes from the statistics stream, not the config draft: it lives in
@@ -225,16 +235,16 @@ export function CalibrationWizard({
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               <Field label={t.endpoints.calReset5h}>
                 <CountdownInput
-                  seconds={remainingSeconds(anchors.bucket_5h)}
+                  seconds={remainingSeconds(anchors.bucket_5h, 5 * 3600)}
                   withDays={false}
-                  onChange={(cd_5h) => sendAnchors(cd_5h, remainingSeconds(anchors.week_reset))}
+                  onChange={(cd_5h) => sendAnchors(cd_5h, remainingSeconds(anchors.week_reset, 7 * 86400))}
                 />
               </Field>
               <Field label={t.endpoints.calResetWeek}>
                 <CountdownInput
-                  seconds={remainingSeconds(anchors.week_reset)}
+                  seconds={remainingSeconds(anchors.week_reset, 7 * 86400)}
                   withDays
-                  onChange={(cd_week) => sendAnchors(remainingSeconds(anchors.bucket_5h), cd_week)}
+                  onChange={(cd_week) => sendAnchors(remainingSeconds(anchors.bucket_5h, 5 * 3600), cd_week)}
                 />
               </Field>
             </div>
@@ -302,17 +312,18 @@ export function CalibrationWizard({
           ) : null}
 
           {/* ---- phase 1: the baseline ---- */}
-          {!pending ? (
-            <div className="space-y-2">
-              <div className="label">{t.endpoints.calStep1}</div>
-              <PctRow label5h={t.endpoints.cal5h} labelWeek={t.endpoints.calWeek}
-                labelMonth={t.endpoints.calMonth} v={base} set={setBase} />
-              <Button size="sm" variant="outline" disabled={busy}
-                onClick={() => void run("start", base)}>
-                {t.endpoints.calRecord1}
-              </Button>
-            </div>
-          ) : null}
+          <div className="space-y-2">
+            <div className="label">{t.endpoints.calStep1}</div>
+            <PctRow label5h={t.endpoints.cal5h} labelWeek={t.endpoints.calWeek}
+              labelMonth={t.endpoints.calMonth} v={base} set={setBase} />
+            <Button size="sm" variant="outline" disabled={busy}
+              onClick={() => void run("start", base)}>
+              {pending ? t.endpoints.calRerecord1 : t.endpoints.calRecord1}
+            </Button>
+            {pending ? (
+              <div className="text-2xs text-[var(--ink-faint)]">{t.endpoints.calRerecordHint}</div>
+            ) : null}
+          </div>
 
           {/* ---- phase 2: the final reading, only once enough traffic has accrued ---- */}
           {pending && ready ? (
