@@ -308,8 +308,9 @@ impl QuotaReading {
         })
     }
     pub fn from_json(v: &Value) -> Option<QuotaReading> {
-        let g = |k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
-        let gi = |k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+        let o = v.as_object()?;
+        let g = |k: &str| o.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let gi = |k: &str| o.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
         Some(QuotaReading {
             at: gi("at"),
             pct_5h: g("pct_5h"),
@@ -391,8 +392,9 @@ impl QuotaCalibration {
         })
     }
     pub fn from_json(v: &Value) -> Option<QuotaCalibration> {
-        let g = |k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
-        let gi = |k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+        let o = v.as_object()?;
+        let g = |k: &str| o.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let gi = |k: &str| o.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
         Some(QuotaCalibration {
             calibrated_at: gi("calibrated_at"),
             scale: g("scale"),
@@ -1186,6 +1188,16 @@ impl Registry {
             if let Ok(mut s) = rt.stats.lock() {
                 *s = AccountStats::default();
             }
+        }
+    }
+
+    /// Drop pending calibration baselines. They are measured against the lifetime token counters,
+    /// which a statistics reset zeroes - keeping a baseline afterwards would clamp the accumulated
+    /// progress to zero until the counters re-climbed past it. Completed derivations stay: their
+    /// totals are plan properties, and their verification runs off the ledger, which survives.
+    pub fn clear_pending_readings(&self) {
+        for rt in self.all() {
+            rt.clear_reading();
         }
     }
 }

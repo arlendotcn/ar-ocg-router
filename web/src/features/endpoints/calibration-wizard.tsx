@@ -99,24 +99,26 @@ const PctRow = ({
   labelMonth,
   v,
   set,
+  disabled,
 }: {
   label5h: string;
   labelWeek: string;
   labelMonth: string;
   v: { pct_5h: number; pct_week: number; pct_month: number };
   set: (x: { pct_5h: number; pct_week: number; pct_month: number }) => void;
+  disabled?: boolean;
 }) => (
   <div className="grid grid-cols-3 gap-2">
     <Field label={label5h}>
-      <Input type="number" step="0.01" min={0} max={100} value={v.pct_5h}
+      <Input type="number" step="0.01" min={0} max={100} disabled={disabled} value={v.pct_5h}
         onChange={(e) => set({ ...v, pct_5h: Number(e.target.value) || 0 })} />
     </Field>
     <Field label={labelWeek}>
-      <Input type="number" step="0.01" min={0} max={100} value={v.pct_week}
+      <Input type="number" step="0.01" min={0} max={100} disabled={disabled} value={v.pct_week}
         onChange={(e) => set({ ...v, pct_week: Number(e.target.value) || 0 })} />
     </Field>
     <Field label={labelMonth}>
-      <Input type="number" step="0.01" min={0} max={100} value={v.pct_month}
+      <Input type="number" step="0.01" min={0} max={100} disabled={disabled} value={v.pct_month}
         onChange={(e) => set({ ...v, pct_month: Number(e.target.value) || 0 })} />
     </Field>
   </div>
@@ -147,6 +149,13 @@ export function CalibrationWizard({
   const blank = { pct_5h: 0, pct_week: 0, pct_month: 0 };
   const [base, setBase] = React.useState(blank);
   const [current, setCurrent] = React.useState(blank);
+  /** The re-record flow: false = the recorded values are shown locked; true = editing a correction. */
+  const [editingBase, setEditingBase] = React.useState(false);
+  /** What this client last saved, stamped at save time. The statistics poll can lag a few seconds;
+   *  until it confirms, the panel must show what was just saved rather than the stale prior value. */
+  const [savedBase, setSavedBase] = React.useState<null | { at: number; pct: typeof blank }>(null);
+  /** Cancelling clears the recorded baseline and any derivation - destructive, so it confirms. */
+  const [cancelArmed, setCancelArmed] = React.useState(false);
   // Anchor edits go through the API and come back on the statistics poll, so for up to five
   // seconds the panel would show the value from before the edit and appear to reject it. These
   // hold the user's own numbers until the server reports them back.
@@ -163,6 +172,13 @@ export function CalibrationWizard({
   }, [cal.anchors, localAnchors]);
   const anchors = localAnchors ?? cal.anchors;
 
+  // The recorded baseline as the server holds it. While the statistics poll catches up after a
+  // save, the local draft is the best known value, so it stands in.
+  const pending = cal.pending;
+  const recorded = pending
+    ? { pct_5h: pending.pct_5h, pct_week: pending.pct_week, pct_month: pending.pct_month }
+    : base;
+
   const sendAnchors = (bucket_5h: number, week_reset: number) => {
     const sent = {
       bucket_5h: bucket_5h > 0 ? Math.floor(Date.now() / 1000) + bucket_5h : 0,
@@ -171,7 +187,6 @@ export function CalibrationWizard({
     setLocalAnchors(sent);
     void run("anchors", { cd_5h: bucket_5h, cd_week: week_reset });
   };
-  const pending = cal.pending;
   const acc = pending?.accumulated;
   // The reveal gate is advisory: enough traffic that a derivation has a chance. The server's
   // own check on the percentage movement is what actually decides.
@@ -185,15 +200,17 @@ export function CalibrationWizard({
    * must leave the panel open: the wizard reads its live state from the statistics stream, so it
    * refreshes itself, and closing on every countdown keystroke made the section impossible to use.
    */
-  const run = async (stage: string, body: Record<string, unknown>, close = false) => {
+  const run = async (stage: string, body: Record<string, unknown>, close = false): Promise<CalibrationResult> => {
     setBusy(true);
     setError(null);
     try {
       const res = await api.calibrate(endpoint.name, { stage, ...body });
       setResult(res);
       if (close) onDone();
+      return res;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      throw e;
     } finally {
       setBusy(false);
     }
@@ -311,18 +328,53 @@ export function CalibrationWizard({
             </div>
           ) : null}
 
-          {/* ---- phase 1: the baseline ---- */}
+          {/* ---- phase 1: the baseline ----
+              Locked once recorded: the fields show what the server holds, so a glance tells you the
+              baseline the derivation will use. 重新记录 unlocks them for a correction; 取消 puts the
+              previously recorded values back. */}
           <div className="space-y-2">
             <div className="label">{t.endpoints.calStep1}</div>
-            <PctRow label5h={t.endpoints.cal5h} labelWeek={t.endpoints.calWeek}
-              labelMonth={t.endpoints.calMonth} v={base} set={setBase} />
-            <Button size="sm" variant="outline" disabled={busy}
-              onClick={() => void run("start", base)}>
-              {pending ? t.endpoints.calRerecord1 : t.endpoints.calRecord1}
-            </Button>
-            {pending ? (
-              <div className="text-2xs text-[var(--ink-faint)]">{t.endpoints.calRerecordHint}</div>
-            ) : null}
+            <PctRow
+              label5h={t.endpoints.cal5h} labelWeek={t.endpoints.calWeek}
+              labelMonth={t.endpoints.calMonth}
+              v={editingBase ? base : recorded}
+              set={setBase}
+              disabled={!!pending && !editingBase}
+            />
+            {!pending ? (
+              <Button size="sm" variant="outline" disabled={busy}
+                onClick={() => void run("start", base)}>
+                {t.endpoints.calRecord1}
+              </Button>
+            ) : editingBase ? (
+              <div className="flex gap-2">
+                <Button size="sm" variant="primary" disabled={busy}
+                  onClick={() => {
+                    void run("start", base);
+                    setEditingBase(false);
+                  }}>
+                  {t.common.save}
+                </Button>
+                <Button size="sm" variant="ghost" disabled={busy}
+                  onClick={() => {
+                    setBase({ pct_5h: recorded.pct_5h, pct_week: recorded.pct_week, pct_month: recorded.pct_month });
+                    setEditingBase(false);
+                  }}>
+                  {t.common.cancel}
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-1">
+                <Button size="sm" variant="outline" disabled={busy}
+                  onClick={() => {
+                    setBase({ pct_5h: recorded.pct_5h, pct_week: recorded.pct_week, pct_month: recorded.pct_month });
+                    setEditingBase(true);
+                  }}>
+                  {t.endpoints.calRerecord1}
+                </Button>
+                <div className="text-2xs text-[var(--ink-faint)]">{t.endpoints.calRerecordHint}</div>
+              </div>
+            )}
           </div>
 
           {/* ---- phase 2: the final reading, only once enough traffic has accrued ---- */}
@@ -336,19 +388,45 @@ export function CalibrationWizard({
                   onClick={() => void run("finish", current, true)}>
                   {t.endpoints.calDerive}
                 </Button>
-                <Button size="sm" variant="ghost" disabled={busy}
-                  onClick={() => void run("cancel", {})}>
-                  {t.common.cancel}
-                </Button>
               </div>
             </div>
           ) : null}
 
+          {/* Cancelling clears the baseline and any derivation - the armed confirm matches Reset
+              data, because the click discards recorded numbers, not a form draft. */}
+          {pending ? (
+            <div className="flex flex-wrap items-center gap-2">
+              {cancelArmed ? (
+                <>
+                  <span className="text-2xs text-[var(--warn)]">{t.endpoints.calCancelHint}</span>
+                  <Button size="sm" disabled={busy}
+                    onClick={() => void run("cancel", {}).then(() => setCancelArmed(false))}
+                    className="border-[var(--danger)] text-[var(--danger)] hover:bg-[var(--danger)]/12">
+                    {t.endpoints.calCancelConfirm}
+                  </Button>
+                  <Button size="sm" variant="ghost" disabled={busy}
+                    onClick={() => setCancelArmed(false)}>
+                    {t.common.cancel}
+                  </Button>
+                </>
+              ) : (
+                <Button size="sm" variant="ghost" disabled={busy}
+                  onClick={() => setCancelArmed(true)}>
+                  {t.endpoints.calCancel}
+                </Button>
+              )}
+            </div>
+          ) : null}
+
           {/* ---- verification of an existing derivation ---- */}
-          {cal.derived ? (
+          {/* Only for a real derivation: an all-zero object resurrected by a state-file round trip
+              is not a result, and rendering a verifier for it invites entering numbers against
+              nothing. */}
+          {cal.derived && cal.derived.calibrated_at > 0 ? (
             <div className="space-y-2 border-t border-[var(--line)] pt-3">
               <div className="label">{t.endpoints.calVerifyTitle}</div>
-              <Field label={t.endpoints.calMonth}>
+              <div className="text-2xs leading-relaxed text-[var(--ink-dim)]">{t.endpoints.calVerifyHint}</div>
+              <Field label={t.endpoints.calMonthCurrent}>
                 <Input type="number" step="0.01" min={0} max={100} value={current.pct_month}
                   onChange={(e) => setCurrent({ ...current, pct_month: Number(e.target.value) || 0 })} />
               </Field>

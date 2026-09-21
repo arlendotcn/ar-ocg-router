@@ -164,6 +164,10 @@ pub fn handle(state: &Arc<AppState>, req: &Request, out: &mut Responder) -> bool
 ///     history, and clearing them would send traffic straight back into a cooling endpoint.
 fn reset_stats(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
     state.registry.reset_stats();
+    // The calibration baselines are measured against the lifetime token counters that were just
+    // zeroed; keeping them would clamp the accumulated progress to zero until the counters
+    // re-climbed past their old values. The user re-records the baseline after a reset.
+    state.registry.clear_pending_readings();
     state.router.health.clear();
     crate::persist::reset_counters(state);
     // The dispatcher counted this request before the reset ran, so the counter sits at 1 and the
@@ -185,7 +189,7 @@ fn reset_stats(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
         200,
         &json!({
             "reset": true,
-            "note": "statistics and endpoint health cleared; the quota ledger was kept",
+            "note": "statistics and endpoint health cleared; a pending calibration baseline was cleared too (the quota ledger was kept)",
         }),
     );
 }
@@ -1021,8 +1025,10 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
     let now = crate::util::now_secs();
     match stage.as_str() {
         "cancel" => {
+            // Only the unfinished half is discarded: a derivation that already completed is a
+            // result the user may want to keep, and aborting a fresh re-calibration must not
+            // destroy it. The bucket anchors are independent of both and stay.
             rt.clear_reading();
-            rt.clear_calibration();
             crate::persist::mark_dirty();
             json_response(req, out, 200, &json!({"cancelled": true}));
         }
