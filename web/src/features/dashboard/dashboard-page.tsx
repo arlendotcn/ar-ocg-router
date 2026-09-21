@@ -372,7 +372,16 @@ function SideSummary({ kind, accounts, used }: { kind: "plans" | "fallback"; acc
         </span>
       </div>
       <div className="grid grid-cols-3 divide-x divide-[var(--line)]">
-        <Readout label={t.dash.tokens} value={fmtNum(tokens)} sub={kind === "plans" ? t.dash.saved : t.dash.cost} />
+        {/* These counters and the monthly percentage above them describe different windows: the
+            counters start at stats_since (which Reset data moves), while the percentage reads the
+            quota ledger, which is not reset. The hint names the counter's own start so the two are
+            not mistaken for the same period. */}
+        <Readout
+          label={t.dash.tokens}
+          help={t.dash.tokensHint}
+          value={fmtNum(tokens)}
+          sub={kind === "plans" ? t.dash.saved : t.dash.cost}
+        />
         <Readout
           label={kind === "plans" ? t.dash.saved : t.dash.cost}
           help={t.dash.savedHint}

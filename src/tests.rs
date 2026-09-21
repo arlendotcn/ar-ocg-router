@@ -1012,3 +1012,110 @@ fn an_older_ledger_file_keeps_its_cost_and_totals() {
     assert_eq!(l.tokens_since(1699999999), 500);
     assert_eq!(l.usage_since(1699999999), (0, 0, 0), "no split was recorded");
 }
+
+// ------------------------------------------------------------------ projection
+
+/// A projection extrapolates a measured rate. When the ledger only covers the tail of the cycle it
+/// has not measured that rate, so it must report no projection rather than a guess. The live case:
+/// a 1.9-hour ledger inside a 31-day cycle reported a 26.5-day basis and projected 43.6% as 51%,
+/// while the real end-of-cycle figure had to be far higher.
+#[test]
+fn a_cycle_the_ledger_only_partly_covers_reports_no_projection() {
+    use crate::config::{QuotaCfg, QuotaUnit};
+    use crate::state::{LocalLedger, QuotaState};
+
+    let at = |s: &str| timeutil::parse_iso8601(s).unwrap();
+    let cfg = QuotaCfg {
+        unit: QuotaUnit::Rmb,
+        monthly: 200.0,
+        cycle_day: 26,
+        ..QuotaCfg::default()
+    };
+
+    let mut q = QuotaState::default();
+    q.ledger = LocalLedger::default();
+    // The cycle began 2026-08-26, but the ledger's first sample is a day before the end of it.
+    q.ledger.add(at("2026-09-24T00:00:00Z"), 20.0, 0);
+    q.ledger.add(at("2026-09-24T12:00:00Z"), 20.0, 0);
+
+    let r = q.report(at("2026-09-25T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg);
+    assert!(r.monthly.has_data, "the used percentage is still real");
+    assert!((r.monthly.pct - 20.0).abs() < 1e-6, "40 of 200 is 20%, got {}", r.monthly.pct);
+    assert_eq!(
+        r.monthly.projected_pct, r.monthly.pct,
+        "a partly observed cycle must not be extrapolated"
+    );
+    assert_eq!(r.monthly.resets_at, Some(at("2026-09-26T00:00:00Z")));
+}
+
+/// When the ledger spans the whole cycle the projection is real, and it must not blow up on the
+/// anchor day itself: `elapsed` is then a second or two, and dividing by it pinned the result to
+/// the 999 cap. The remote branch has always floored the fraction at 8%; the local one now does too.
+#[test]
+fn a_fully_observed_cycle_projects_without_running_away() {
+    use crate::config::{QuotaCfg, QuotaUnit};
+    use crate::state::{LocalLedger, QuotaState};
+
+    let at = |s: &str| timeutil::parse_iso8601(s).unwrap();
+    let cfg = QuotaCfg {
+        unit: QuotaUnit::Rmb,
+        monthly: 200.0,
+        cycle_day: 26,
+        ..QuotaCfg::default()
+    };
+
+    // The ledger's first sample must fall at or before the cycle start for a projection to be
+    // justified. The 31-day retention window bounds how far back that can be, so the cycle is
+    // anchored so that its start is exactly where the ledger opens: anchor day 27 puts the start at
+    // 2026-08-27, and the ledger opens on that same instant.
+    let cfg = QuotaCfg { cycle_day: 27, ..cfg };
+    let mut q = QuotaState::default();
+    q.ledger = LocalLedger::default();
+    q.ledger.add(at("2026-08-27T00:00:00Z"), 1.0, 0);
+    q.ledger.add(at("2026-09-11T00:00:00Z"), 19.0, 0);
+
+    // The cycle runs 2026-08-27 -> 2026-09-27 (31 days), so 15 of 31 have elapsed (fraction 0.4839).
+    // 20 of 200 in the window is 10%; at that rate the cycle ends near 10/0.4839 = 20.7%.
+    let r = q.report(at("2026-09-11T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg);
+    assert!((r.monthly.pct - 10.0).abs() < 1e-6, "20 of 200 is 10%, got {}", r.monthly.pct);
+    assert!(
+        r.monthly.projected_pct > r.monthly.pct,
+        "a third of the cycle gone with 10% spent is a pace to overshoot, got {}",
+        r.monthly.projected_pct
+    );
+    assert!(
+        (r.monthly.projected_pct - 20.0).abs() < 1.0,
+        "10% over half the cycle projects to ~20%, got {}",
+        r.monthly.projected_pct
+    );
+
+    // On the anchor day itself the fraction is floored, so the projection stays bounded. The
+    // ledger opens exactly at the cycle start, which is the boundary the coverage check allows.
+    let mut q2 = QuotaState::default();
+    q2.ledger = LocalLedger::default();
+    q2.ledger.add(at("2026-08-27T00:00:00Z"), 0.5, 0);
+    q2.ledger.add(at("2026-08-27T00:00:01Z"), 2.0, 0);
+    let edge = q2.report(at("2026-08-27T00:00:02Z"), 3_600, 80.0, true, 99.0, &cfg);
+    assert!(
+        edge.monthly.projected_pct < 999.0,
+        "the anchor-day instant must be floored, got {}",
+        edge.monthly.projected_pct
+    );
+}
+
+/// A sliding window has no cycle, so it keeps reporting no projection and no reset instant.
+#[test]
+fn a_sliding_window_still_reports_no_projection() {
+    use crate::config::{QuotaCfg, QuotaUnit};
+    use crate::state::{LocalLedger, QuotaState};
+
+    let at = |s: &str| timeutil::parse_iso8601(s).unwrap();
+    let cfg = QuotaCfg { unit: QuotaUnit::Rmb, monthly: 200.0, cycle_day: 0, ..QuotaCfg::default() };
+    let mut q = QuotaState::default();
+    q.ledger = LocalLedger::default();
+    q.ledger.add(at("2026-09-01T00:00:00Z"), 30.0, 0);
+
+    let r = q.report(at("2026-09-02T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg);
+    assert_eq!(r.monthly.resets_at, None);
+    assert_eq!(r.monthly.projected_pct, r.monthly.pct);
+}

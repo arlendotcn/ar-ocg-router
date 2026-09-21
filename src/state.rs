@@ -632,6 +632,7 @@ fn view(
     limit: f64,
     use_remote: bool,
     cycle: Option<(i64, i64)>,
+    observed_from: Option<i64>,
 ) -> QuotaView {
     if use_remote && (win.pct > 0.0 || win.resets_at.is_some() || !win.status.is_empty()) {
         let frac = match win.resets_at {
@@ -655,13 +656,30 @@ fn view(
             // Projection needs the elapsed fraction of the window. For a fixed cycle we know both
             // ends outright; for a rolling one we assume the caller just started observing it, as
             // before, which is why the sliding case has never reported a projection.
+            // `resets_at` is a fact about the provider's calendar and is reported whenever the
+            // cycle is known, independently of whether a projection can be justified: the console
+            // shows the countdown either way.
             let (projected, resets_at) = match cycle {
                 Some((start, end)) if end > now => {
                     // The cycle's real length, not the nominal month: a billing period can be 28
                     // days (Jan 31 -> Feb 28), and projecting against 30 would understate it.
                     let len = (end - start).max(1) as f64;
                     let elapsed = (now - start).max(1) as f64;
-                    (pct * len / elapsed, Some(end))
+                    // Extrapolating from a window we only started observing partway through is
+                    // meaningless: the numerator is what the ledger saw, the denominator is the
+                    // whole cycle, so a ledger that began yesterday reports a rate it never
+                    // measured. `observed_from` is the ledger's own first sample; when it starts
+                    // after the cycle does, there is no honest projection to give and the
+                    // projection is suppressed (the reset instant is still reported).
+                    if matches!(observed_from, Some(from) if from > start) {
+                        (pct, Some(end))
+                    } else {
+                        // The anchor day itself makes `elapsed` a second or two, which pushed the
+                        // ratio into the 999 cap. The remote branch has always floored its fraction
+                        // at 8%; the local one needs the same floor to stay comparable.
+                        let frac = (elapsed / len).clamp(0.08, 1.0);
+                        (pct / frac, Some(end))
+                    }
                 }
                 _ => (pct, None),
             };
@@ -739,9 +757,12 @@ impl QuotaState {
         let has_local = lp_rolling.is_some() || lp_weekly.is_some() || lp_monthly.is_some();
 
         // Only the monthly window has a cycle; the shorter windows stay rolling sums.
-        let rolling = view(&self.rolling, PERIOD_ROLLING, now, lp_rolling, quota.rolling, use_remote, None);
-        let weekly = view(&self.weekly, PERIOD_WEEKLY, now, lp_weekly, quota.weekly, use_remote, None);
-        let monthly = view(&self.monthly, PERIOD_MONTHLY, now, lp_monthly, quota.monthly, use_remote, cycle);
+        // When the ledger's own history starts. A projection is only as good as the span it
+        // measured, so a window the ledger did not cover from its beginning reports no projection.
+        let observed_from = self.ledger.samples.front().map(|s| s.ts);
+        let rolling = view(&self.rolling, PERIOD_ROLLING, now, lp_rolling, quota.rolling, use_remote, None, observed_from);
+        let weekly = view(&self.weekly, PERIOD_WEEKLY, now, lp_weekly, quota.weekly, use_remote, None, observed_from);
+        let monthly = view(&self.monthly, PERIOD_MONTHLY, now, lp_monthly, quota.monthly, use_remote, cycle, observed_from);
 
         let max_pct = rolling.pct.max(weekly.pct).max(monthly.pct);
         let max_projected = rolling.projected_pct.max(weekly.projected_pct).max(monthly.projected_pct);

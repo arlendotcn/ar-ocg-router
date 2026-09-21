@@ -118,7 +118,9 @@ const zh = {
     resetStats: "重置数据",
     resetStatsHint: "把请求数、流式、重试、端点统计和失败记忆全部归零，并立即写入状态文件。本地额度记账保留，因为它参与选路；服务重启后统计不会清零。进行中的额度校准起点也会被清除（计数已归零，旧起点无法继续对比），需要重新记录。",
     statsSince: "统计始于",
-    statsSinceHint: "当前这批统计数字的起点。它是跨重启累计的（不像「运行时长」只算本次进程），点「重置数据」会把它一起更新。",
+  tokensHint:
+    "这里的 token 是路由器自己统计的累计值，起点就是页面顶部的「统计始于」；点「重置数据」会把它清零并移动那个起点。左侧的百分比是另一回事：它读的是额度账本，重置数据不会清账本，所以两者描述的时间窗可能不同。",
+    statsSinceHint: "当前这批统计计数器（请求数、token、金额）的起点。它跨重启累计（不像「运行时长」只算本次进程），点「重置数据」会把它一起更新。注意：端点列表里的用量百分比读的是额度账本，不受这个起点约束，重置数据也不会清账本。",
     statsSinceUnknown: "未知",
     resetStatsTitle: "重置后无法恢复。确定归零？",
     resetBlockedByCal: "有端点的额度校准进行中：重置会清除其起点读数。请先取消校准。",
@@ -580,7 +582,9 @@ const en: Dict = {
     resetStats: "Reset data",
     resetStatsHint: "Zero the request, stream and retry counters, the per-endpoint statistics and the failure memory, and write the state file immediately. The local quota ledger is kept because it feeds routing, and these counters survive a restart. A calibration baseline in progress is cleared too: its token counters were just zeroed, so record the baseline again.",
     statsSince: "Counting since",
-    statsSinceHint: "When this set of statistics began. The counters accumulate across restarts (unlike uptime, which is only this process), and Reset data moves this start along with them.",
+  tokensHint:
+    "Tokens are counted by the router itself, starting at the \"Counting since\" instant at the top of the page; Reset data zeroes them and moves that start. The percentage beside them is a different measure: it reads the quota ledger, which Reset data does not clear, so the two can describe different windows.",
+    statsSinceHint: "When these counters (requests, tokens, money) began. They accumulate across restarts, unlike uptime, which only covers this process; Reset data moves this start along with them. Note that the usage percentages in the endpoint list read the quota ledger instead, which this start does not govern and Reset data does not clear.",
     statsSinceUnknown: "unknown",
     resetStatsTitle: "A reset cannot be undone. Zero everything?",
     resetBlockedByCal: "An endpoint has a calibration in progress: a reset clears its baseline. Cancel the calibration first.",
