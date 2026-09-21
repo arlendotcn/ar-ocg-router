@@ -42,9 +42,9 @@ pub struct Persisted {
     pub ledgers: HashMap<String, crate::state::LocalLedger>,
     /// Process-wide counters (requests / streams / retries / bytes).
     pub counters: Option<crate::httpd::StaticsSnapshot>,
-    /// Per-endpoint quota-calibration flows (a pending reading and/or a derivation).
-    pub calibrations:
-        HashMap<String, (Option<crate::state::QuotaReading>, Option<crate::state::QuotaCalibration>)>,
+    /// Per-endpoint quota-calibration flows (a pending reading and/or a derivation), plus the
+    /// bucket anchors copied from the provider's console.
+    pub calibrations: HashMap<String, crate::state::CalibrationEntry>,
     /// When the statistics counters started accumulating (unix seconds).
     ///
     /// The counters are lifetime totals that survive restarts, while the uptime shown next to them
@@ -106,8 +106,12 @@ pub fn load(path: &Path) -> Persisted {
             for (name, c) in xs {
                 let reading = c.get("pending").and_then(crate::state::QuotaReading::from_json);
                 let derived = c.get("derived").and_then(crate::state::QuotaCalibration::from_json);
-                if reading.is_some() || derived.is_some() {
-                    calibrations.insert(name.clone(), (reading, derived));
+                let anchors = c
+                    .get("anchors")
+                    .map(crate::state::QuotaAnchors::from_json)
+                    .unwrap_or_default();
+                if reading.is_some() || derived.is_some() || anchors.bucket_5h > 0 || anchors.week_reset > 0 {
+                    calibrations.insert(name.clone(), crate::state::CalibrationEntry { reading, derived, anchors });
                 }
             }
         }
@@ -193,12 +197,13 @@ pub fn save(path: &Path, data: &Persisted, now: i64) -> Result<(), String> {
     // endpoint that will never be calibrated) adds nothing to the file.
     if !data.calibrations.is_empty() {
         let mut cal = serde_json::Map::new();
-        for (name, (reading, derived)) in &data.calibrations {
+        for (name, entry) in &data.calibrations {
             cal.insert(
                 name.clone(),
                 json!({
-                    "pending": reading.as_ref().map(|r| r.to_json()).unwrap_or(Value::Null),
-                    "derived": derived.as_ref().map(|c| c.to_json()).unwrap_or(Value::Null),
+                    "pending": entry.reading.as_ref().map(|r| r.to_json()).unwrap_or(Value::Null),
+                    "derived": entry.derived.as_ref().map(|c| c.to_json()).unwrap_or(Value::Null),
+                    "anchors": entry.anchors.to_json(),
                 }),
             );
         }

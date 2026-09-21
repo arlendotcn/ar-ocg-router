@@ -982,7 +982,9 @@ const CALIBRATE_MIN_DELTA_PP: f64 = 0.3;
 /// derivation counts as verified.
 const CALIBRATE_VERIFY_TOLERANCE_PP: f64 = 0.5;
 
-fn reading_from_body(doc: &Value) -> Result<crate::state::QuotaReading, String> {
+/// The three console percentages, validated. The token counters are snapshotted from the router's
+/// own statistics server-side, never typed by the user.
+fn reading_pcts(doc: &Value) -> Result<(f64, f64, f64), String> {
     let pct = |k: &str| -> Result<f64, String> {
         let p = num_at(doc, k).unwrap_or(0.0);
         if !(0.0..=100.0).contains(&p) {
@@ -990,15 +992,7 @@ fn reading_from_body(doc: &Value) -> Result<crate::state::QuotaReading, String> 
         }
         Ok(p)
     };
-    Ok(crate::state::QuotaReading {
-        at: crate::util::now_secs(),
-        pct_5h: pct("pct_5h")?,
-        pct_week: pct("pct_week")?,
-        pct_month: pct("pct_month")?,
-        cd_5h: int_at(doc, "cd_5h").unwrap_or(0).max(0),
-        cd_week: int_at(doc, "cd_week").unwrap_or(0).max(0),
-        cd_month: int_at(doc, "cd_month").unwrap_or(0).max(0),
-    })
+    Ok((pct("pct_5h")?, pct("pct_week")?, pct("pct_month")?))
 }
 
 /// POST /api/endpoints/<name>/calibrate - derive a no-usage-API plan's real allowance.
@@ -1024,6 +1018,7 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
         error_response(req, out, 404, &format!("unknown endpoint {:?}", name));
         return true;
     };
+    let now = crate::util::now_secs();
     match stage.as_str() {
         "cancel" => {
             rt.clear_reading();
@@ -1032,35 +1027,75 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
             json_response(req, out, 200, &json!({"cancelled": true}));
         }
         "start" => {
-            let reading = match reading_from_body(&doc) {
-                Ok(r) => r,
+            let (p5, pw, pm) = match reading_pcts(&doc) {
+                Ok(v) => v,
                 Err(e) => {
                     error_response(req, out, 400, &e);
                     return true;
                 }
             };
-            rt.set_reading(reading);
+            // The token counters are snapshotted here so the wizard can show exactly what the
+            // router forwarded since this moment, per token class. Server-side, never typed.
+            let st = rt.stats.lock().map(|s| s.clone()).unwrap_or_default();
+            rt.set_reading(crate::state::QuotaReading {
+                at: now,
+                pct_5h: p5,
+                pct_week: pw,
+                pct_month: pm,
+                base_prompt: st.prompt_tokens as i64,
+                base_cached: st.cached_tokens as i64,
+                base_completion: st.completion_tokens as i64,
+            });
             crate::persist::mark_dirty();
-            log_info!("[{}] calibration reading 1 recorded", name);
+            log_info!("[{}] calibration baseline recorded", name);
             json_response(req, out, 200, &json!({"stage": "start", "recorded": true}));
         }
+        "anchors" => {
+            // The console's reset countdowns, applicable the moment they arrive. Kept apart from
+            // the readings: they are the bucket model, not part of the derivation.
+            let cd_5h = int_at(&doc, "cd_5h").unwrap_or(0).max(0);
+            let cd_week = int_at(&doc, "cd_week").unwrap_or(0).max(0);
+            rt.set_anchors(crate::state::QuotaAnchors {
+                bucket_5h: now + cd_5h,
+                week_reset: now + cd_week,
+            });
+            crate::persist::mark_dirty();
+            json_response(
+                req,
+                out,
+                200,
+                &json!({
+                    "stage": "anchors",
+                    "bucket_5h_resets_at": if cd_5h > 0 { json!(crate::timeutil::iso8601(now + cd_5h)) } else { Value::Null },
+                    "week_resets_at": if cd_week > 0 { json!(crate::timeutil::iso8601(now + cd_week)) } else { Value::Null },
+                }),
+            );
+        }
         "finish" => {
-            // Peek, not take: every validation failure below must leave the reading in place, or a
+            // Peek, not take: every validation failure below must leave the baseline in place, or a
             // rejected finish would silently discard the user's first reading.
             let Some(r1) = rt.peek_reading() else {
-                error_response(req, out, 409, "no pending first reading; run stage=start first");
+                error_response(req, out, 409, "no baseline reading; record one first");
                 return true;
             };
-            let r2 = match reading_from_body(&doc) {
-                Ok(r) => r,
+            let (p5, pw, pm) = match reading_pcts(&doc) {
+                Ok(v) => v,
                 Err(e) => {
                     error_response(req, out, 400, &e);
                     return true;
                 }
             };
-            let (t1, t2) = (r1.at, r2.at);
-            if t2 <= t1 {
-                error_response(req, out, 400, "the second reading must come after the first");
+            let t2 = now;
+            let t1 = r1.at;
+            // Within a cycle the percentage only grows; a lower reading means the console's window
+            // reset between the two readings and the pair is unusable.
+            if pm < r1.pct_month {
+                error_response(
+                    req,
+                    out,
+                    400,
+                    "the monthly percentage is below the baseline reading, so the window reset in between; start a new calibration inside one cycle",
+                );
                 return true;
             }
             // Both readings must sit in one subscription cycle: across a reset the percentage
@@ -1089,14 +1124,14 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
                 );
                 return true;
             }
-            let d_month = r2.pct_month - r1.pct_month;
+            let d_month = pm - r1.pct_month;
             if d_month < CALIBRATE_MIN_DELTA_PP {
                 error_response(
                     req,
                     out,
                     409,
                     &format!(
-                        "the monthly percentage moved only {:.2} points; at least {:.1} are needed to outpace the console's rounding",
+                        "the monthly percentage moved only {:.2} points; at least {:.1} are needed to outpace the console's rounding. Keep using the endpoint and try again with a fresh reading",
                         d_month, CALIBRATE_MIN_DELTA_PP
                     ),
                 );
@@ -1109,22 +1144,26 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
                 return true;
             }
             // A window whose readings span one of its own resets says nothing about its total, so
-            // such a window is skipped rather than derived from broken numbers.
-            let crossed = |cd1: i64, window: i64| -> bool {
-                if cd1 > 0 {
-                    t2 - t1 > cd1
+            // such a window is skipped rather than derived from broken numbers. With a recorded
+            // anchor the reset moments are exact; without one, a span as long as the window itself
+            // guarantees a crossing.
+            let anchors = rt.quota.lock().map(|q| q.anchors.clone()).unwrap_or_default();
+            let crossed = |anchor: i64, window: i64| -> bool {
+                if anchor > 0 {
+                    let r = crate::state::roll_forward(anchor, window, t2).unwrap_or(t2);
+                    r - window > t1
                 } else {
                     t2 - t1 >= window
                 }
             };
-            let d_5h = r2.pct_5h - r1.pct_5h;
-            let rolling_total = if crossed(r1.cd_5h, crate::state::PERIOD_ROLLING) || d_5h < CALIBRATE_MIN_DELTA_PP {
+            let d_5h = p5 - r1.pct_5h;
+            let rolling_total = if crossed(anchors.bucket_5h, crate::state::PERIOD_ROLLING) || d_5h < CALIBRATE_MIN_DELTA_PP {
                 0.0
             } else {
                 scale * l * 100.0 / d_5h
             };
-            let d_week = r2.pct_week - r1.pct_week;
-            let weekly_total = if crossed(r1.cd_week, crate::state::PERIOD_WEEKLY) || d_week < CALIBRATE_MIN_DELTA_PP {
+            let d_week = pw - r1.pct_week;
+            let weekly_total = if crossed(anchors.week_reset, crate::state::PERIOD_WEEKLY) || d_week < CALIBRATE_MIN_DELTA_PP {
                 0.0
             } else {
                 scale * l * 100.0 / d_week
@@ -1146,11 +1185,9 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
                 scale,
                 rolling_total,
                 weekly_total,
-                bucket_5h: if r2.cd_5h > 0 { t2 + r2.cd_5h } else { 0 },
-                week_reset: if r2.cd_week > 0 { t2 + r2.cd_week } else { 0 },
                 verified_at: 0,
                 residual_pp: 0.0,
-                ref_pct_month: r2.pct_month,
+                ref_pct_month: pm,
                 ref_at: t2,
             };
             // The derivation succeeded: now, and only now, the pending reading is consumed.

@@ -31,9 +31,12 @@ export type Quota = {
     weekly: number;
     monthly: number;
   };
-  /** The calibration wizard's state: a first reading awaiting its second, and/or a derivation. */
+  /** The calibration wizard's state: a baseline awaiting the final reading, and/or a derivation. */
   calibration: {
-    pending: QuotaReading | null;
+    anchors: QuotaAnchors;
+    pending: (QuotaReading & {
+      accumulated: { cost: number; prompt: number; cached: number; completion: number; total: number };
+    }) | null;
     derived: QuotaCalibration | null;
   };
   last_error: string | null;
@@ -144,16 +147,21 @@ export type QuotaCfg = {
   cycle_day: number;
 };
 
-/** One reading of the provider console's percentages, plus its "resets in ..." countdowns. */
+/** The baseline half of a calibration: console percentages plus the router's token counters. */
 export type QuotaReading = {
   at: number;
   pct_5h: number;
   pct_week: number;
   pct_month: number;
-  /** Countdowns in seconds the console printed beside each window; 0 = not noted. */
-  cd_5h: number;
-  cd_week: number;
-  cd_month: number;
+  base_prompt: number;
+  base_cached: number;
+  base_completion: number;
+};
+
+/** The bucket reset moments copied from the provider console's countdowns, in unix seconds. */
+export type QuotaAnchors = {
+  bucket_5h: number;
+  week_reset: number;
 };
 
 /**
@@ -169,8 +177,6 @@ export type QuotaCalibration = {
   scale: number;
   rolling_total: number;
   weekly_total: number;
-  bucket_5h: number;
-  week_reset: number;
   verified_at: number | null;
   residual_pp: number | null;
   ref_pct_month: number;

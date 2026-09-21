@@ -704,7 +704,7 @@ fn two_readings_derive_the_window_totals_and_price_scale() {
     let cal = QuotaCalibration { scale, rolling_total, weekly_total: 0.0, ..Default::default() };
     q.calibration = Some(cal);
     let report = q.report(t2, 3_600, 80.0, true, 99.0, &crate::config::QuotaCfg::default());
-    let v = q.to_json(t2, &report, "RMB");
+    let v = q.to_json(t2, &report, "RMB", &crate::state::AccountStats::default());
     assert_eq!(v["calibration"]["derived"]["scale"], 6.0);
     assert_eq!(v["calibration"]["derived"]["rolling_total"], 4800.0);
 }
@@ -726,22 +726,18 @@ fn a_derived_bucket_reports_from_its_own_start() {
     q.ledger.add(reset - 5 * 3600 - 3600, 50.0, 0);
     q.ledger.add(reset - 3600, 30.0, 0);
 
-    q.calibration = Some(QuotaCalibration {
-        scale: 1.0,
-        rolling_total: total,
-        weekly_total: 0.0,
-        bucket_5h: reset,
-        ..Default::default()
-    });
+    q.calibration = Some(QuotaCalibration { scale: 1.0, rolling_total: total, weekly_total: 0.0, ..Default::default() });
+    // The anchor lives apart from the derivation: it is the bucket model, editable on its own.
+    q.anchors = crate::state::QuotaAnchors { bucket_5h: reset, week_reset: 0 };
     let report = q.report(now, 3_600, 80.0, true, 99.0, &crate::config::QuotaCfg::default());
-    let v = q.to_json(now, &report, "RMB");
+    let v = q.to_json(now, &report, "RMB", &crate::state::AccountStats::default());
     assert_eq!(v["rolling"]["used"], 30.0, "only the in-bucket sample counts");
     assert_eq!(v["rolling"]["percent"], 30.0);
     assert_eq!(v["rolling"]["limit"], total);
     // The bucket rolls forward by whole periods, so a later read still finds a future reset.
     let later = reset + 3600;
     let report2 = q.report(later, 3_600, 80.0, true, 99.0, &crate::config::QuotaCfg::default());
-    let v2 = q.to_json(later, &report2, "RMB");
+    let v2 = q.to_json(later, &report2, "RMB", &crate::state::AccountStats::default());
     assert_eq!(v2["rolling"]["resets_at"], timeutil::iso8601(reset + 5 * 3600).as_str());
 }
 
@@ -756,23 +752,21 @@ fn calibration_state_round_trips_through_the_state_file() {
         pct_5h: 1.5,
         pct_week: 0.25,
         pct_month: 32.0,
-        cd_5h: 3600,
-        cd_week: 86_400,
-        cd_month: 604_800,
+        base_prompt: 1_000,
+        base_cached: 800,
+        base_completion: 20,
     };
     let j = reading.to_json();
     let back = QuotaReading::from_json(&j).unwrap();
     assert_eq!(back.at, reading.at);
     assert_eq!(back.pct_month, 32.0);
-    assert_eq!(back.cd_week, 86_400);
+    assert_eq!(back.base_cached, 800);
 
     let cal = QuotaCalibration {
         calibrated_at: 1_700_100_000,
         scale: 1.2,
         rolling_total: 4800.0,
         weekly_total: 12_000.0,
-        bucket_5h: 1_700_103_600,
-        week_reset: 1_700_600_000,
         verified_at: 1_700_200_000,
         residual_pp: 0.03,
         ref_pct_month: 44.0,
@@ -782,9 +776,15 @@ fn calibration_state_round_trips_through_the_state_file() {
     let back = QuotaCalibration::from_json(&j).unwrap();
     assert!((back.scale - 1.2).abs() < 1e-9);
     assert_eq!(back.rolling_total, 4800.0);
-    assert_eq!(back.bucket_5h, cal.bucket_5h);
     assert_eq!(back.verified_at, cal.verified_at);
     assert!((back.ref_pct_month - 44.0).abs() < 1e-9);
+
+    // The anchors travel with the entry but independently of the derivation.
+    let anchors = crate::state::QuotaAnchors { bucket_5h: 1_700_103_600, week_reset: 1_700_600_000 };
+    let aj = anchors.to_json();
+    let back_a = crate::state::QuotaAnchors::from_json(&aj);
+    assert_eq!(back_a.bucket_5h, anchors.bucket_5h);
+    assert_eq!(back_a.week_reset, anchors.week_reset);
 }
 
 // ------------------------------------------------------------------ quota unit reporting
@@ -813,29 +813,29 @@ fn a_money_budget_without_a_probe_reports_its_currency_as_the_unit() {
     let r1 = q.report(1_000_000, 3_600, 80.0, true, 99.0, &unstated);
     assert_eq!(r1.accounting, Accounting::Money, "bounded windows are money");
     assert_eq!(
-        q.to_json(1_000_000, &r1, "RMB")["unit"],
+        q.to_json(1_000_000, &r1, "RMB", &crate::state::AccountStats::default())["unit"],
         "rmb",
         "the console must be told the denomination, not shown a bare number"
     );
     // An endpoint with no currency label gets the unitless answer rather than an invented symbol.
-    assert_eq!(q.to_json(1_000_000, &r1, "")["unit"], "none");
+    assert_eq!(q.to_json(1_000_000, &r1, "", &crate::state::AccountStats::default())["unit"], "none");
 
     // 2. A stated unit is already the answer; prices.currency must not override it.
     let stated = QuotaCfg { unit: QuotaUnit::Rmb, ..money.clone() };
     let r2 = q.report(1_000_000, 3_600, 80.0, true, 99.0, &stated);
     assert_eq!(r2.accounting, Accounting::Money);
-    assert_eq!(q.to_json(1_000_000, &r2, "USD")["unit"], "rmb", "the config wins over the label");
+    assert_eq!(q.to_json(1_000_000, &r2, "USD", &crate::state::AccountStats::default())["unit"], "rmb", "the config wins over the label");
 
     let tok = QuotaCfg { unit: QuotaUnit::Tokens, ..money.clone() };
     let r3 = q.report(1_000_000, 3_600, 80.0, true, 99.0, &tok);
     assert_eq!(r3.accounting, Accounting::Tokens);
-    assert_eq!(q.to_json(1_000_000, &r3, "RMB")["unit"], "tokens");
+    assert_eq!(q.to_json(1_000_000, &r3, "RMB", &crate::state::AccountStats::default())["unit"], "tokens");
 
     // 3. No windows at all: nothing to denominate, so it stays unitless even with prices present.
     let unbounded = QuotaCfg { unit: QuotaUnit::None, rolling: 0.0, weekly: 0.0, monthly: 0.0, ..money };
     let r4 = q.report(1_000_000, 3_600, 80.0, true, 99.0, &unbounded);
     assert_eq!(r4.accounting, Accounting::None, "an unbudgeted plan measures nothing");
-    assert_eq!(q.to_json(1_000_000, &r4, "RMB")["unit"], "none");
+    assert_eq!(q.to_json(1_000_000, &r4, "RMB", &crate::state::AccountStats::default())["unit"], "none");
 }
 
 /// A probe can express a provider-side unit, so it wins: a plan metered in tokens by the provider
@@ -854,6 +854,6 @@ fn a_remote_probe_keeps_its_own_unit() {
     };
     let q = QuotaState::default();
     let report = q.report(1_000_000, 3_600, 80.0, true, 99.0, &cfg);
-    assert_eq!(q.to_json(1_000_000, &report, "USD")["unit"], "tokens");
+    assert_eq!(q.to_json(1_000_000, &report, "USD", &crate::state::AccountStats::default())["unit"], "tokens");
 }
 

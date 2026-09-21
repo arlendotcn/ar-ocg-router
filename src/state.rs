@@ -279,20 +279,20 @@ impl LocalLedger {
     }
 }
 
-/// One percentage reading copied off the provider's console, per window.
+/// The baseline half of a calibration: the console's percentages plus the router's own token
+/// counters at that same moment.
 ///
-/// `cd_*` are the console's own "resets in ..." countdowns, in seconds (0 = not noted). They are
-/// not part of the derivation math; they anchor the bucket model so the console's windows can be
-/// reproduced locally for display.
+/// The counters are what makes the "recording" phase observable: the difference between them and
+/// the live counters is exactly what the router forwarded since the reading, per token class.
 #[derive(Debug, Clone, Default)]
 pub struct QuotaReading {
     pub at: i64,
     pub pct_5h: f64,
     pub pct_week: f64,
     pub pct_month: f64,
-    pub cd_5h: i64,
-    pub cd_week: i64,
-    pub cd_month: i64,
+    pub base_prompt: i64,
+    pub base_cached: i64,
+    pub base_completion: i64,
 }
 
 impl QuotaReading {
@@ -302,9 +302,9 @@ impl QuotaReading {
             "pct_5h": self.pct_5h,
             "pct_week": self.pct_week,
             "pct_month": self.pct_month,
-            "cd_5h": self.cd_5h,
-            "cd_week": self.cd_week,
-            "cd_month": self.cd_month,
+            "base_prompt": self.base_prompt,
+            "base_cached": self.base_cached,
+            "base_completion": self.base_completion,
         })
     }
     pub fn from_json(v: &Value) -> Option<QuotaReading> {
@@ -315,10 +315,40 @@ impl QuotaReading {
             pct_5h: g("pct_5h"),
             pct_week: g("pct_week"),
             pct_month: g("pct_month"),
-            cd_5h: gi("cd_5h"),
-            cd_week: gi("cd_week"),
-            cd_month: gi("cd_month"),
+            base_prompt: gi("base_prompt"),
+            base_cached: gi("base_cached"),
+            base_completion: gi("base_completion"),
         })
+    }
+}
+
+/// Everything a calibration flow keeps per endpoint, persisted as one block.
+#[derive(Debug, Clone, Default)]
+pub struct CalibrationEntry {
+    pub reading: Option<QuotaReading>,
+    pub derived: Option<QuotaCalibration>,
+    pub anchors: QuotaAnchors,
+}
+
+/// The moments each provider window resets, copied from the console's countdowns.
+///
+/// Kept apart from the calibration on purpose: they are not part of the derivation math, they are
+/// the bucket model that lets local percentages line up with the provider's. The user can correct
+/// them at any time and the change applies the moment it arrives - a countdown copied off a console
+/// and submitted two hours later describes the past, so there is no "pending" state to hold it.
+#[derive(Debug, Clone, Default)]
+pub struct QuotaAnchors {
+    pub bucket_5h: i64,
+    pub week_reset: i64,
+}
+
+impl QuotaAnchors {
+    pub fn to_json(&self) -> Value {
+        json!({ "bucket_5h": self.bucket_5h, "week_reset": self.week_reset })
+    }
+    pub fn from_json(v: &Value) -> QuotaAnchors {
+        let gi = |k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+        QuotaAnchors { bucket_5h: gi("bucket_5h"), week_reset: gi("week_reset") }
     }
 }
 
@@ -336,9 +366,6 @@ pub struct QuotaCalibration {
     pub scale: f64,
     pub rolling_total: f64,
     pub weekly_total: f64,
-    /// Next reset moment of each bucket, from the console countdowns (0 = unknown).
-    pub bucket_5h: i64,
-    pub week_reset: i64,
     /// Set by a third reading agreeing with the prediction. Until then the derivation is unproven.
     pub verified_at: i64,
     /// Predicted minus actual, in percentage points, from the last verification reading.
@@ -357,8 +384,6 @@ impl QuotaCalibration {
             "scale": self.scale,
             "rolling_total": self.rolling_total,
             "weekly_total": self.weekly_total,
-            "bucket_5h": self.bucket_5h,
-            "week_reset": self.week_reset,
             "verified_at": if self.verified_at > 0 { json!(self.verified_at) } else { Value::Null },
             "residual_pp": if self.verified_at > 0 { json!(self.residual_pp) } else { Value::Null },
             "ref_pct_month": self.ref_pct_month,
@@ -373,40 +398,24 @@ impl QuotaCalibration {
             scale: g("scale"),
             rolling_total: g("rolling_total"),
             weekly_total: g("weekly_total"),
-            bucket_5h: gi("bucket_5h"),
-            week_reset: gi("week_reset"),
             verified_at: gi("verified_at"),
             residual_pp: g("residual_pp"),
             ref_pct_month: g("ref_pct_month"),
             ref_at: gi("ref_at"),
         })
     }
+}
 
-    /// The current 5-hour bucket: roll the recorded reset forward until it is in the future.
-    fn bucket_5h_now(&self, now: i64) -> Option<i64> {
-        const BUCKET: i64 = 5 * 3600;
-        let mut reset = self.bucket_5h;
-        if reset <= 0 {
-            return None;
-        }
-        while reset <= now {
-            reset += BUCKET;
-        }
-        Some(reset)
+/// Roll a recorded reset forward until it lies in the future, by whole periods.
+pub fn roll_forward(reset: i64, period: i64, now: i64) -> Option<i64> {
+    let mut r = reset;
+    if r <= 0 {
+        return None;
     }
-
-    /// The current weekly window's next reset, rolled forward by whole weeks.
-    fn week_reset_now(&self, now: i64) -> Option<i64> {
-        const WEEK: i64 = 7 * 86400;
-        let mut reset = self.week_reset;
-        if reset <= 0 {
-            return None;
-        }
-        while reset <= now {
-            reset += WEEK;
-        }
-        Some(reset)
+    while r <= now {
+        r += period;
     }
+    Some(r)
 }
 
 #[derive(Debug, Clone)]
@@ -420,6 +429,8 @@ pub struct QuotaState {
     /// A first reading awaiting its second, and the derivation of a completed pair.
     pub reading: Option<QuotaReading>,
     pub calibration: Option<QuotaCalibration>,
+    /// Bucket reset moments copied from the provider's console; editable at any time.
+    pub anchors: QuotaAnchors,
     pub last_error: Option<String>,
     /// Set when the upstream explicitly reported "out of quota" / 429-budget errors.
     pub exhausted_until: i64,
@@ -438,6 +449,7 @@ impl Default for QuotaState {
             ledger: LocalLedger::default(),
             reading: None,
             calibration: None,
+            anchors: QuotaAnchors::default(),
             last_error: None,
             exhausted_until: 0,
             probe_after: 0,
@@ -678,7 +690,7 @@ impl QuotaState {
     /// `currency` is the endpoint's own money label (`prices.currency`, empty when unset). It is
     /// only consulted when the windows are money and the config could not name a unit, so that the
     /// console never shows amounts whose denomination it refuses to state.
-    pub fn to_json(&self, now: i64, report: &QuotaReport, currency: &str) -> Value {
+    pub fn to_json(&self, now: i64, report: &QuotaReport, currency: &str, stats: &AccountStats) -> Value {
         let w = |v: &QuotaView| {
             json!({
                 "percent": (v.pct * 10.0).round() / 10.0,
@@ -720,13 +732,17 @@ impl QuotaState {
             }))
         };
         let rolling_view = match &self.calibration {
-            Some(c) => derived_view(c.rolling_total, PERIOD_ROLLING, c.bucket_5h_now(now))
-                .unwrap_or_else(|| w(&report.rolling)),
+            Some(c) => {
+                derived_view(c.rolling_total, PERIOD_ROLLING, roll_forward(self.anchors.bucket_5h, PERIOD_ROLLING, now))
+                    .unwrap_or_else(|| w(&report.rolling))
+            }
             None => w(&report.rolling),
         };
         let weekly_view = match &self.calibration {
-            Some(c) => derived_view(c.weekly_total, PERIOD_WEEKLY, c.week_reset_now(now))
-                .unwrap_or_else(|| w(&report.weekly)),
+            Some(c) => {
+                derived_view(c.weekly_total, PERIOD_WEEKLY, roll_forward(self.anchors.week_reset, PERIOD_WEEKLY, now))
+                    .unwrap_or_else(|| w(&report.weekly))
+            }
             None => w(&report.weekly),
         };
         json!({
@@ -748,7 +764,25 @@ impl QuotaState {
                 "monthly": (self.ledger.window_cost(now, PERIOD_MONTHLY) * 1e6).round() / 1e6,
             },
             "calibration": {
-                "pending": self.reading.as_ref().map(|r| r.to_json()),
+                "anchors": self.anchors.to_json(),
+                "pending": self.reading.as_ref().map(|r| {
+                    // What the router forwarded since the reading was taken, per token class: the
+                    // progress signal that tells the user when the second reading is worth entering.
+                    json!({
+                        "at": r.at,
+                        "pct_5h": r.pct_5h,
+                        "pct_week": r.pct_week,
+                        "pct_month": r.pct_month,
+                        "accumulated": {
+                            "cost": (self.ledger.cost_since(r.at) * 1e6).round() / 1e6,
+                            "prompt": (stats.prompt_tokens as i64 - r.base_prompt).max(0),
+                            "cached": (stats.cached_tokens as i64 - r.base_cached).max(0),
+                            "completion": (stats.completion_tokens as i64 - r.base_completion).max(0),
+                            "total": ((stats.prompt_tokens as i64 - r.base_prompt).max(0)
+                                + (stats.completion_tokens as i64 - r.base_completion).max(0)),
+                        },
+                    })
+                }),
                 "derived": self.calibration.as_ref().map(|c| c.to_json()),
             },
             "last_error": self.last_error,
@@ -850,6 +884,14 @@ impl AccountRuntime {
         }
     }
 
+    /// Update the bucket anchors (the console's reset moments). Applies immediately: a countdown
+    /// copied off a console describes that instant, not whenever some form is eventually submitted.
+    pub fn set_anchors(&self, a: QuotaAnchors) {
+        if let Ok(mut q) = self.quota.lock() {
+            q.anchors = a;
+        }
+    }
+
     pub fn calibration(&self) -> Option<QuotaCalibration> {
         self.quota.lock().ok().and_then(|q| q.calibration.clone())
     }
@@ -939,7 +981,7 @@ impl AccountRuntime {
         let quota = self
             .quota
             .lock()
-            .map(|q| q.to_json(now, report, cfg.prices.currency.as_str()))
+            .map(|q| q.to_json(now, report, cfg.prices.currency.as_str(), &s))
             .unwrap_or(Value::Null);
         let balance = self.balance.lock().ok().and_then(|b| {
             b.as_ref().map(|v| {
@@ -1093,10 +1135,7 @@ impl Registry {
     }
 
     /// Re-attach calibration flows at startup: a pending first reading, or a completed derivation.
-    pub fn restore_calibrations(
-        &self,
-        map: &HashMap<String, (Option<QuotaReading>, Option<QuotaCalibration>)>,
-    ) {
+    pub fn restore_calibrations(&self, map: &HashMap<String, CalibrationEntry>) {
         if map.is_empty() {
             return;
         }
@@ -1105,14 +1144,15 @@ impl Registry {
             Err(p) => p.into_inner(),
         };
         let mut restored = 0usize;
-        for (name, (reading, derived)) in map {
+        for (name, entry) in map {
             let Some(rt) = m.get(name) else { continue };
             let mut q = match rt.quota.lock() {
                 Ok(q) => q,
                 Err(p) => p.into_inner(),
             };
-            q.reading = reading.clone();
-            q.calibration = derived.clone();
+            q.reading = entry.reading.clone();
+            q.calibration = entry.derived.clone();
+            q.anchors = entry.anchors.clone();
             restored += 1;
         }
         crate::log_info!("restored calibration state for {} endpoint(s)", restored);
@@ -1147,17 +1187,22 @@ pub fn ledger_snapshot(state: &crate::proxy::AppState) -> HashMap<String, LocalL
 
 /// The calibration flow per endpoint: a pending first reading and/or a completed derivation.
 /// Both survive restarts - the wizard spans a consumption window that can outlive the process.
-pub fn calibration_snapshot(
-    state: &crate::proxy::AppState,
-) -> HashMap<String, (Option<QuotaReading>, Option<QuotaCalibration>)> {
+pub fn calibration_snapshot(state: &crate::proxy::AppState) -> HashMap<String, CalibrationEntry> {
     let mut out = HashMap::new();
     for rt in state.registry.all() {
         let q = match rt.quota.lock() {
             Ok(q) => q,
             Err(p) => p.into_inner(),
         };
-        if q.reading.is_some() || q.calibration.is_some() {
-            out.insert(rt.name.clone(), (q.reading.clone(), q.calibration.clone()));
+        if q.reading.is_some() || q.calibration.is_some() || q.anchors.bucket_5h > 0 || q.anchors.week_reset > 0 {
+            out.insert(
+                rt.name.clone(),
+                CalibrationEntry {
+                    reading: q.reading.clone(),
+                    derived: q.calibration.clone(),
+                    anchors: q.anchors.clone(),
+                },
+            );
         }
     }
     out

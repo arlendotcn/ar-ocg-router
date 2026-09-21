@@ -7,16 +7,18 @@ import { useStatsStream } from "@/lib/use-stats";
 import { Button } from "@/components/ui/button";
 import { Field, Input } from "@/components/ui/field";
 import { cn } from "@/lib/utils";
-import type { EndpointCfg, QuotaCalibration, QuotaReading } from "@/types/api";
+import type { EndpointCfg, QuotaAnchors, QuotaCalibration, QuotaReading } from "@/types/api";
 
-/**
- * A "resets in ..." countdown as three small boxes: days, hours, minutes.
- *
- * One box holding raw seconds was unusable - the value displayed a unit the user was not typing in,
- * so every keystroke re-scaled the number under the cursor. Three boxes each show the unit they
- * collect, and the stored value stays in seconds. `withDays` is off for the 5-hour bucket, which
- * never spans a day.
- */
+/** Reveal the final-reading fields once this many tokens have flowed since the baseline.
+ *  A necessary hint, not a guarantee: what actually matters is the percentage movement on the
+ *  provider's console, which the server validates when the derivation is attempted. */
+const REVEAL_TOKENS = 1_000_000;
+
+/** A "resets in ..." countdown as three small boxes: days, hours, minutes.
+ *  One box holding raw seconds was unusable - the value displayed a unit the user was not typing
+ *  in, so every keystroke re-scaled the number under the cursor. Each box shows the unit it
+ *  collects, and the stored value stays in seconds. `withDays` is off for the 5-hour bucket,
+ *  which never spans a day. */
 function CountdownInput({
   seconds,
   withDays,
@@ -64,19 +66,50 @@ function CountdownInput({
   );
 }
 
-/**
- * Derive a plan's real allowance when the provider exposes no usage API.
+/** The wizard's live state comes from the statistics stream, not the config draft: it lives in
+ *  the running registry, and the console refreshes it on the same poll as everything else. */
+function useCalibration(endpoint: EndpointCfg) {
+  const { stats } = useStatsStream({ intervalMs: 5000 });
+  const live = stats?.accounts.find((a) => a.name === endpoint.name)?.quota.calibration;
+  return live ?? { anchors: { bucket_5h: 0, week_reset: 0 }, pending: null, derived: null };
+}
+
+const PctRow = ({
+  label5h,
+  labelWeek,
+  labelMonth,
+  v,
+  set,
+}: {
+  label5h: string;
+  labelWeek: string;
+  labelMonth: string;
+  v: { pct_5h: number; pct_week: number; pct_month: number };
+  set: (x: { pct_5h: number; pct_week: number; pct_month: number }) => void;
+}) => (
+  <div className="grid grid-cols-3 gap-2">
+    <Field label={label5h}>
+      <Input type="number" step="0.01" min={0} max={100} value={v.pct_5h}
+        onChange={(e) => set({ ...v, pct_5h: Number(e.target.value) || 0 })} />
+    </Field>
+    <Field label={labelWeek}>
+      <Input type="number" step="0.01" min={0} max={100} value={v.pct_week}
+        onChange={(e) => set({ ...v, pct_week: Number(e.target.value) || 0 })} />
+    </Field>
+    <Field label={labelMonth}>
+      <Input type="number" step="0.01" min={0} max={100} value={v.pct_month}
+        onChange={(e) => set({ ...v, pct_month: Number(e.target.value) || 0 })} />
+    </Field>
+  </div>
+);
+
+/** Derive a plan's real allowance when the provider exposes no usage API.
  *
- * The console shows only percentages, and the router only sees the traffic it forwarded. Two
- * percentage readings taken around a known amount of forwarded consumption fix the ratio between
- * "percentage points moved" and "weighted units spent", so the window totals fall out - and,
- * anchored on the plan price, so does the true per-token value. That is why the wizard is a
- * before/after pair rather than a single number: one reading says nothing about the total, only the
- * movement between two does.
- *
- * The countdown fields are optional but worth copying: they are the only way to learn when each
- * bucket restarts, which is what lets the local percentages line up with the provider's.
- */
+ *  Three phases, in this order: record the baseline, let the endpoint accumulate a measurable
+ *  amount of traffic, then record the current reading. Between baseline and current the percentage
+ *  movement corresponds to the forwarded consumption, which pins down the window totals and the
+ *  true per-token prices. The bucket anchors live outside the readings entirely - they are
+ *  editable at any time and apply the moment they arrive. */
 export function CalibrationWizard({
   endpoint,
   onDone,
@@ -89,10 +122,19 @@ export function CalibrationWizard({
   const [error, setError] = React.useState<string | null>(null);
   const [result, setResult] = React.useState<CalibrationResult | null>(null);
   const [open, setOpen] = React.useState(false);
-  // The reading being entered: percentages plus the console's countdowns (in minutes, for typing).
-  const blank = { pct_5h: 0, pct_week: 0, pct_month: 0, cd_5h: 0, cd_week: 0, cd_month: 0 };
-  const [r1, setR1] = React.useState(blank);
-  const [r2, setR2] = React.useState(blank);
+  const blank = { pct_5h: 0, pct_week: 0, pct_month: 0 };
+  const [base, setBase] = React.useState(blank);
+  const [current, setCurrent] = React.useState(blank);
+  const [cd, setCd] = React.useState({ cd_5h: 0, cd_week: 0 });
+
+  const cal = useCalibration(endpoint);
+  const pending = cal.pending;
+  const acc = pending?.accumulated;
+  // The reveal gate is advisory: enough traffic that a derivation has a chance. The server's
+  // own check on the percentage movement is what actually decides.
+  const ready = (acc?.total ?? 0) >= REVEAL_TOKENS;
+  const monthly = endpoint.quota.monthly;
+  const hintReady = monthly > 0 && (acc?.cost ?? 0) >= monthly * 0.003;
 
   const run = async (stage: string, body: Record<string, unknown>) => {
     setBusy(true);
@@ -108,57 +150,6 @@ export function CalibrationWizard({
     }
   };
 
-  const readFields = (
-    label: string,
-    v: typeof blank,
-    set: (x: typeof blank) => void,
-    withCountdown: boolean,
-  ) => (
-    <div className="space-y-2">
-      <div className="label">{label}</div>
-      <div className="grid grid-cols-3 gap-2">
-        <Field label={t.endpoints.cal5h}>
-          <Input type="number" step="0.01" min={0} max={100} value={v.pct_5h}
-            onChange={(e) => set({ ...v, pct_5h: Number(e.target.value) || 0 })} />
-        </Field>
-        <Field label={t.endpoints.calWeek}>
-          <Input type="number" step="0.01" min={0} max={100} value={v.pct_week}
-            onChange={(e) => set({ ...v, pct_week: Number(e.target.value) || 0 })} />
-        </Field>
-        <Field label={t.endpoints.calMonth}>
-          <Input type="number" step="0.01" min={0} max={100} value={v.pct_month}
-            onChange={(e) => set({ ...v, pct_month: Number(e.target.value) || 0 })} />
-        </Field>
-      </div>
-      {withCountdown ? (
-        <>
-          <div className="text-2xs text-[var(--ink-faint)]">{t.endpoints.calCountdownHint}</div>
-          <div className="grid grid-cols-3 gap-2">
-            <Field label={t.endpoints.calReset5h}>
-              <CountdownInput seconds={v.cd_5h} withDays={false}
-                onChange={(secs) => set({ ...v, cd_5h: secs })} />
-            </Field>
-            <Field label={t.endpoints.calResetWeek}>
-              <CountdownInput seconds={v.cd_week} withDays
-                onChange={(secs) => set({ ...v, cd_week: secs })} />
-            </Field>
-            <Field label={t.endpoints.calResetMonth}>
-              <CountdownInput seconds={v.cd_month} withDays
-                onChange={(secs) => set({ ...v, cd_month: secs })} />
-            </Field>
-          </div>
-        </>
-      ) : null}
-    </div>
-  );
-
-  // The wizard's live state comes from the statistics stream, not the config draft: it lives in
-  // the running registry, and the console refreshes it on the same poll as everything else.
-  const { stats } = useStatsStream({ intervalMs: 5000 });
-  const live = stats?.accounts.find((a) => a.name === endpoint.name)?.quota.calibration;
-  const state: { pending: QuotaReading | null; derived: QuotaCalibration | null } =
-    live ?? { pending: null, derived: null };
-
   return (
     <section className="plate">
       <button
@@ -173,11 +164,11 @@ export function CalibrationWizard({
         <span className="mono text-xs uppercase tracking-[0.16em]">{t.endpoints.calTitle}</span>
         <span className="flex items-center gap-2">
           <span className="mono text-2xs text-[var(--ink-faint)]">
-            {state.derived
-              ? state.derived.verified_at
+            {cal.derived
+              ? cal.derived.verified_at
                 ? t.endpoints.calStateVerified
                 : t.endpoints.calStateDerived
-              : state.pending
+              : cal.pending
                 ? t.endpoints.calStatePending
                 : t.endpoints.calStateNone}
           </span>
@@ -189,25 +180,41 @@ export function CalibrationWizard({
         <div className="space-y-3 px-3 py-3">
           <p className="text-xs leading-relaxed text-[var(--ink-dim)]">{t.endpoints.calIntro}</p>
 
-          {state.derived ? (
+          {/* ---- bucket anchors: editable at any time, applied on arrival ---- */}
+          <div className="space-y-2 rounded-[2px] border border-[var(--line)] bg-[var(--panel)] p-2.5">
+            <div className="label">{t.endpoints.calAnchorsTitle}</div>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <Field label={t.endpoints.calReset5h}>
+                <CountdownInput seconds={cal.anchors.bucket_5h} withDays={false}
+                  onChange={(cd_5h) => void run("anchors", { cd_5h, cd_week: cal.anchors.week_reset })} />
+              </Field>
+              <Field label={t.endpoints.calResetWeek}>
+                <CountdownInput seconds={cal.anchors.week_reset} withDays
+                  onChange={(cd_week) => void run("anchors", { cd_5h: cal.anchors.bucket_5h, cd_week })} />
+              </Field>
+            </div>
+            <div className="text-2xs text-[var(--ink-faint)]">{t.endpoints.calAnchorsHint}</div>
+          </div>
+
+          {cal.derived ? (
             <div className="space-y-1.5 rounded-[2px] border border-[var(--line)] bg-[var(--panel)] p-2.5">
               <div className="label">{t.endpoints.calDerived}</div>
               <div className="mono text-xs text-[var(--ink)]">
-                {t.endpoints.calScale.replace("{n}", state.derived.scale.toFixed(4))}
+                {t.endpoints.calScale.replace("{n}", cal.derived.scale.toFixed(4))}
               </div>
-              {state.derived.rolling_total > 0 ? (
+              {cal.derived.rolling_total > 0 ? (
                 <div className="mono text-xs">
-                  {t.endpoints.calTotal5h.replace("{n}", state.derived.rolling_total.toFixed(2))}
+                  {t.endpoints.calTotal5h.replace("{n}", cal.derived.rolling_total.toFixed(2))}
                 </div>
               ) : null}
-              {state.derived.weekly_total > 0 ? (
+              {cal.derived.weekly_total > 0 ? (
                 <div className="mono text-xs">
-                  {t.endpoints.calTotalWeek.replace("{n}", state.derived.weekly_total.toFixed(2))}
+                  {t.endpoints.calTotalWeek.replace("{n}", cal.derived.weekly_total.toFixed(2))}
                 </div>
               ) : null}
-              {state.derived.verified_at ? (
+              {cal.derived.verified_at ? (
                 <div className="mono text-2xs text-[var(--up)]">
-                  {t.endpoints.calVerified.replace("{n}", (state.derived.residual_pp ?? 0).toFixed(3))}
+                  {t.endpoints.calVerified.replace("{n}", (cal.derived.residual_pp ?? 0).toFixed(3))}
                 </div>
               ) : (
                 <div className="text-2xs text-[var(--ink-faint)]">{t.endpoints.calUnverified}</div>
@@ -215,39 +222,74 @@ export function CalibrationWizard({
             </div>
           ) : null}
 
-          {readFields(t.endpoints.calStep1, r1, setR1, true)}
-          <div className="flex gap-2">
-            <Button size="sm" variant="outline" disabled={busy}
-              onClick={() => void run("start", r1)}>
-              {t.endpoints.calRecord1}
-            </Button>
-            {state.pending ? (
-              <Button size="sm" variant="ghost" disabled={busy}
-                onClick={() => void run("cancel", {})}>
-                {t.common.cancel}
-              </Button>
-            ) : null}
-          </div>
-
-          {state.pending ? (
-            <div className="mono text-2xs text-[var(--ink-faint)]">
-              {t.endpoints.calPendingAt.replace("{n}", new Date(state.pending.at * 1000).toLocaleString())}
+          {pending ? (
+            <div className="space-y-2 rounded-[2px] border border-[var(--line)] bg-[var(--panel)] p-2.5">
+              <div className="label">{t.endpoints.calRecording}</div>
+              <div className="mono text-xs">
+                {t.endpoints.calProgress
+                  .replace("{in}", (acc?.prompt ?? 0) - (acc?.cached ?? 0) > 0
+                    ? ((acc?.prompt ?? 0) - (acc?.cached ?? 0)).toLocaleString() : "0")
+                  .replace("{cached}", (acc?.cached ?? 0).toLocaleString())
+                  .replace("{out}", (acc?.completion ?? 0).toLocaleString())}
+              </div>
+              <div className="mono text-2xs text-[var(--ink-faint)]">
+                {t.endpoints.calProgressTotal
+                  .replace("{n}", (acc?.total ?? 0).toLocaleString())
+                  .replace("{goal}", REVEAL_TOKENS.toLocaleString())}
+              </div>
+              {!ready ? (
+                <div className="text-2xs text-[var(--warn)]">{t.endpoints.calKeepGoing}</div>
+              ) : null}
+              <div className="text-2xs text-[var(--danger)]">{t.endpoints.calExclusive}</div>
             </div>
           ) : null}
 
-          <div className="border-t border-[var(--line)] pt-3">
-            {readFields(t.endpoints.calStep2, r2, setR2, true)}
-            <div className="mt-2 flex flex-wrap gap-2">
-              <Button size="sm" variant="primary" disabled={busy || !state.pending}
-                onClick={() => void run("finish", r2)}>
-                {t.endpoints.calDerive}
+          {/* ---- phase 1: the baseline ---- */}
+          {!pending ? (
+            <div className="space-y-2">
+              <div className="label">{t.endpoints.calStep1}</div>
+              <PctRow label5h={t.endpoints.cal5h} labelWeek={t.endpoints.calWeek}
+                labelMonth={t.endpoints.calMonth} v={base} set={setBase} />
+              <Button size="sm" variant="outline" disabled={busy}
+                onClick={() => void run("start", base)}>
+                {t.endpoints.calRecord1}
               </Button>
-              <Button size="sm" variant="outline" disabled={busy || !state.derived}
-                onClick={() => void run("verify", { pct_month: r2.pct_month })}>
+            </div>
+          ) : null}
+
+          {/* ---- phase 2: the final reading, only once enough traffic has accrued ---- */}
+          {pending && ready ? (
+            <div className="space-y-2 border-t border-[var(--line)] pt-3">
+              <div className="label">{t.endpoints.calStep2}</div>
+              <PctRow label5h={t.endpoints.cal5h} labelWeek={t.endpoints.calWeek}
+                labelMonth={t.endpoints.calMonth} v={current} set={setCurrent} />
+              <div className="flex gap-2">
+                <Button size="sm" variant="primary" disabled={busy}
+                  onClick={() => void run("finish", current)}>
+                  {t.endpoints.calDerive}
+                </Button>
+                <Button size="sm" variant="ghost" disabled={busy}
+                  onClick={() => void run("cancel", {})}>
+                  {t.common.cancel}
+                </Button>
+              </div>
+            </div>
+          ) : null}
+
+          {/* ---- verification of an existing derivation ---- */}
+          {cal.derived ? (
+            <div className="space-y-2 border-t border-[var(--line)] pt-3">
+              <div className="label">{t.endpoints.calVerifyTitle}</div>
+              <Field label={t.endpoints.calMonth}>
+                <Input type="number" step="0.01" min={0} max={100} value={current.pct_month}
+                  onChange={(e) => setCurrent({ ...current, pct_month: Number(e.target.value) || 0 })} />
+              </Field>
+              <Button size="sm" variant="outline" disabled={busy}
+                onClick={() => void run("verify", { pct_month: current.pct_month })}>
                 {t.endpoints.calVerify}
               </Button>
             </div>
-          </div>
+          ) : null}
 
           {result?.note ? <div className="text-2xs text-[var(--warn)]">{result.note}</div> : null}
           {result?.residual_pp !== undefined ? (
