@@ -1040,17 +1040,15 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
                     return true;
                 }
             };
-            // The token counters are snapshotted here so the wizard can show exactly what the
-            // router forwarded since this moment, per token class. Server-side, never typed.
-            let st = rt.stats.lock().map(|s| s.clone()).unwrap_or_default();
+            // Only the readings and the instant are stored: progress since this moment is read
+            // from the ledger by timestamp, so nothing here can go stale when the statistics are
+            // reset (the wizard's "consumed since the reading" figure used to, and reported the
+            // whole counter value as a result).
             rt.set_reading(crate::state::QuotaReading {
                 at: now,
                 pct_5h: p5,
                 pct_week: pw,
                 pct_month: pm,
-                base_prompt: st.prompt_tokens as i64,
-                base_cached: st.cached_tokens as i64,
-                base_completion: st.completion_tokens as i64,
             });
             crate::persist::mark_dirty();
             log_info!("[{}] calibration baseline recorded", name);

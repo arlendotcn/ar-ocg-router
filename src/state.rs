@@ -125,15 +125,34 @@ impl QuotaSource {
 /// can be estimated without maintaining a price table.
 #[derive(Debug, Default, Clone)]
 pub struct LocalLedger {
-    /// (timestamp, usd, tokens)
-    pub samples: VecDeque<(i64, f64, u64)>,
+    pub samples: VecDeque<LedgerSample>,
     pub total_cost: f64,
     pub total_tokens: u64,
 }
 
-/// How many samples are written to the state file. The live ledger keeps far more, but the file is
-/// rewritten every few seconds, and a sliding window never reaches back further than a month: 2000
-/// samples cover any realistic request rate while keeping the file small.
+/// One request's contribution to the ledger.
+///
+/// The token split is kept per class rather than as one total because the calibration shows the
+/// user how much of each class the router forwarded since a baseline. Deriving that from the
+/// statistics counters made the figure depend on `stats_since` and on the reset button, so the
+/// same baseline could report progress that jumped or fell back. These samples are the ledger's own
+/// record, which is the number the calibration actually reasons about.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LedgerSample {
+    pub ts: i64,
+    pub cost: f64,
+    pub tokens: u64,
+    pub prompt: u64,
+    pub cached: u64,
+    pub completion: u64,
+}
+
+impl LedgerSample {
+    fn total_tokens(&self) -> u64 {
+        self.tokens
+    }
+}
+
 /// How many ledger samples are written to the state file.
 ///
 /// This used to be 2000 as a size cap. That was wrong: the calibration reads consumption as
@@ -168,11 +187,22 @@ impl LocalLedger {
         // survives the in-memory window is written - see PERSISTED_SAMPLES for why dropping the
         // old ones is not an option.
         let keep = self.samples.len().min(PERSISTED_SAMPLES);
+        // [ts, cost, tokens, prompt, cached, completion]. Readable in time order, and extensible by
+        // appending fields: `from_state_json` accepts both this and the older 3-field form.
         let samples: Vec<Value> = self
             .samples
             .iter()
             .skip(self.samples.len() - keep)
-            .map(|(ts, cost, tokens)| json!([ts, cost, tokens]))
+            .map(|s| {
+                json!([
+                    s.ts,
+                    s.cost,
+                    s.tokens,
+                    s.prompt,
+                    s.cached,
+                    s.completion
+                ])
+            })
             .collect();
         json!({
             "total_cost": self.total_cost,
@@ -189,22 +219,37 @@ impl LocalLedger {
         if let Some(list) = o.get("samples").and_then(|x| x.as_array()) {
             for item in list {
                 let Some(t) = item.as_array() else { continue };
-                if t.len() != 3 {
+                // 3 fields is the older form, which did not record the per-class split. Those
+                // samples keep their cost and token total and report zero for the split rather than
+                // being dropped: the money is real even when the breakdown was not recorded.
+                if t.len() < 3 {
                     continue;
                 }
                 let ts = t[0].as_i64().unwrap_or(0);
-                let cost = t[1].as_f64().unwrap_or(0.0);
-                let tokens = t[2].as_u64().unwrap_or(0);
-                if ts > 0 {
-                    l.samples.push_back((ts, cost, tokens));
+                if ts <= 0 {
+                    continue;
                 }
+                l.samples.push_back(LedgerSample {
+                    ts,
+                    cost: t[1].as_f64().unwrap_or(0.0),
+                    tokens: t[2].as_u64().unwrap_or(0),
+                    prompt: t.get(3).and_then(|x| x.as_u64()).unwrap_or(0),
+                    cached: t.get(4).and_then(|x| x.as_u64()).unwrap_or(0),
+                    completion: t.get(5).and_then(|x| x.as_u64()).unwrap_or(0),
+                });
             }
         }
         l
     }
 
+    /// Record one request. `tokens` is the class total; the split is optional so callers that only
+    /// have a total (and the tests) keep working.
     pub fn add(&mut self, now: i64, cost: f64, tokens: u64) {
-        self.samples.push_back((now, cost, tokens));
+        self.add_usage(now, cost, tokens, 0, 0, 0);
+    }
+
+    pub fn add_usage(&mut self, now: i64, cost: f64, tokens: u64, prompt: u64, cached: u64, completion: u64) {
+        self.samples.push_back(LedgerSample { ts: now, cost, tokens, prompt, cached, completion });
         self.total_cost += cost;
         self.total_tokens += tokens;
         // The in-memory cap and the persisted cap are the same number on purpose. If memory kept
@@ -214,8 +259,8 @@ impl LocalLedger {
             self.samples.pop_front();
         }
         let cutoff = now - 31 * 86400;
-        while let Some((ts, _, _)) = self.samples.front() {
-            if *ts < cutoff {
+        while let Some(s) = self.samples.front() {
+            if s.ts < cutoff {
                 self.samples.pop_front();
             } else {
                 break;
@@ -229,8 +274,8 @@ impl LocalLedger {
             .samples
             .iter()
             .rev()
-            .take_while(|(ts, _, _)| *ts >= from)
-            .map(|(_, c, _)| *c)
+            .take_while(|s| s.ts >= from)
+            .map(|s| s.cost)
             .sum();
         // Summing an empty or all-zero window yields -0.0, which prints as "-0.00" in the console.
         // Zero money is zero in either sign; the negative zero is an artefact of IEEE addition.
@@ -248,8 +293,8 @@ impl LocalLedger {
             .samples
             .iter()
             .rev()
-            .take_while(|(ts, _, _)| *ts >= since)
-            .map(|(_, c, _)| *c)
+            .take_while(|s| s.ts >= since)
+            .map(|s| s.cost)
             .sum();
         if sum == 0.0 {
             0.0
@@ -262,9 +307,25 @@ impl LocalLedger {
         self.samples
             .iter()
             .rev()
-            .take_while(|(ts, _, _)| *ts >= since)
-            .map(|(_, _, t)| *t)
+            .take_while(|s| s.ts >= since)
+            .map(|s| s.total_tokens())
             .sum()
+    }
+
+    /// Per-class token totals recorded at or after `since`.
+    ///
+    /// This is the progress figure the calibration shows: it comes from the same samples the money
+    /// does, so it cannot disagree with the L that the derivation divides by.
+    pub fn usage_since(&self, since: i64) -> (u64, u64, u64) {
+        let mut prompt = 0u64;
+        let mut cached = 0u64;
+        let mut completion = 0u64;
+        for s in self.samples.iter().rev().take_while(|s| s.ts >= since) {
+            prompt += s.prompt;
+            cached += s.cached;
+            completion += s.completion;
+        }
+        (prompt, cached, completion)
     }
 
     /// Consumption recorded in the half-open interval [from, to).
@@ -286,8 +347,8 @@ impl LocalLedger {
         if !factor.is_finite() || factor <= 0.0 || factor == 1.0 {
             return;
         }
-        for (_, cost, _) in self.samples.iter_mut() {
-            *cost *= factor;
+        for s in self.samples.iter_mut() {
+            s.cost *= factor;
         }
         self.total_cost *= factor;
     }
@@ -297,26 +358,24 @@ impl LocalLedger {
         self.samples
             .iter()
             .rev()
-            .take_while(|(ts, _, _)| *ts >= from)
-            .map(|(_, _, t)| *t)
+            .take_while(|s| s.ts >= from)
+            .map(|s| s.total_tokens())
             .sum()
     }
 }
 
-/// The baseline half of a calibration: the console's percentages plus the router's own token
-/// counters at that same moment.
+/// The baseline half of a calibration: the console's percentages at one moment.
 ///
-/// The counters are what makes the "recording" phase observable: the difference between them and
-/// the live counters is exactly what the router forwarded since the reading, per token class.
+/// Only `at` and the percentages are needed. Progress since the reading is read from the ledger by
+/// timestamp, which is why no counter snapshot is stored here: a counter baseline went stale the
+/// moment "reset data" zeroed those counters, and the difference it produced was silently the whole
+/// counter value instead of the consumption since the reading.
 #[derive(Debug, Clone, Default)]
 pub struct QuotaReading {
     pub at: i64,
     pub pct_5h: f64,
     pub pct_week: f64,
     pub pct_month: f64,
-    pub base_prompt: i64,
-    pub base_cached: i64,
-    pub base_completion: i64,
 }
 
 impl QuotaReading {
@@ -326,9 +385,6 @@ impl QuotaReading {
             "pct_5h": self.pct_5h,
             "pct_week": self.pct_week,
             "pct_month": self.pct_month,
-            "base_prompt": self.base_prompt,
-            "base_cached": self.base_cached,
-            "base_completion": self.base_completion,
         })
     }
     pub fn from_json(v: &Value) -> Option<QuotaReading> {
@@ -340,9 +396,6 @@ impl QuotaReading {
             pct_5h: g("pct_5h"),
             pct_week: g("pct_week"),
             pct_month: g("pct_month"),
-            base_prompt: gi("base_prompt"),
-            base_cached: gi("base_cached"),
-            base_completion: gi("base_completion"),
         })
     }
 }
@@ -722,7 +775,7 @@ impl QuotaState {
     /// `currency` is the endpoint's own money label (`prices.currency`, empty when unset). It is
     /// only consulted when the windows are money and the config could not name a unit, so that the
     /// console never shows amounts whose denomination it refuses to state.
-    pub fn to_json(&self, now: i64, report: &QuotaReport, currency: &str, stats: &AccountStats) -> Value {
+    pub fn to_json(&self, now: i64, report: &QuotaReport, currency: &str, _stats: &AccountStats) -> Value {
         let w = |v: &QuotaView| {
             json!({
                 "percent": (v.pct * 10.0).round() / 10.0,
@@ -800,6 +853,14 @@ impl QuotaState {
                 "pending": self.reading.as_ref().map(|r| {
                     // What the router forwarded since the reading was taken, per token class: the
                     // progress signal that tells the user when the second reading is worth entering.
+                    //
+                    // Read from the ledger, not from the statistics counters. The counters are
+                    // zeroed by "reset data" while this baseline survives, and subtracting a
+                    // pre-reset baseline from a post-reset counter produced a figure that was
+                    // silently the whole counter value - progress that looked plausible and was
+                    // simply wrong. The ledger is also what the derivation divides by, so keeping
+                    // both on one source means the progress shown and the maths applied agree.
+                    let (prompt, cached, completion) = self.ledger.usage_since(r.at);
                     json!({
                         "at": r.at,
                         "pct_5h": r.pct_5h,
@@ -807,11 +868,10 @@ impl QuotaState {
                         "pct_month": r.pct_month,
                         "accumulated": {
                             "cost": (self.ledger.cost_since(r.at) * 1e6).round() / 1e6,
-                            "prompt": (stats.prompt_tokens as i64 - r.base_prompt).max(0),
-                            "cached": (stats.cached_tokens as i64 - r.base_cached).max(0),
-                            "completion": (stats.completion_tokens as i64 - r.base_completion).max(0),
-                            "total": ((stats.prompt_tokens as i64 - r.base_prompt).max(0)
-                                + (stats.completion_tokens as i64 - r.base_completion).max(0)),
+                            "prompt": prompt,
+                            "cached": cached,
+                            "completion": completion,
+                            "total": prompt + completion,
                         },
                     })
                 }),
@@ -1039,7 +1099,16 @@ impl AccountRuntime {
         let tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
         if usage.cost_usd > 0.0 || tokens > 0 {
             if let Ok(mut q) = self.quota.lock() {
-                q.ledger.add(now, usage.cost_usd, tokens);
+                // The per-class split is recorded alongside the cost so the calibration can show
+                // progress per class from the same source it derives money from.
+                q.ledger.add_usage(
+                    now,
+                    usage.cost_usd,
+                    tokens,
+                    usage.prompt_tokens,
+                    usage.cached_tokens,
+                    usage.completion_tokens,
+                );
             }
         }
     }

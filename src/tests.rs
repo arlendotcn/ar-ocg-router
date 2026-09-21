@@ -752,15 +752,12 @@ fn calibration_state_round_trips_through_the_state_file() {
         pct_5h: 1.5,
         pct_week: 0.25,
         pct_month: 32.0,
-        base_prompt: 1_000,
-        base_cached: 800,
-        base_completion: 20,
     };
     let j = reading.to_json();
     let back = QuotaReading::from_json(&j).unwrap();
     assert_eq!(back.at, reading.at);
     assert_eq!(back.pct_month, 32.0);
-    assert_eq!(back.base_cached, 800);
+    assert_eq!(back.pct_week, 0.25);
 
     let cal = QuotaCalibration {
         calibrated_at: 1_700_100_000,
@@ -960,7 +957,7 @@ fn the_ledger_stays_in_time_order_across_a_restart() {
         l.add(start + i, 0.5, 10);
     }
     let restored = crate::state::LocalLedger::from_state_json(&l.to_state_json());
-    let stamps: Vec<i64> = restored.samples.iter().map(|(ts, _, _)| *ts).collect();
+    let stamps: Vec<i64> = restored.samples.iter().map(|s| s.ts).collect();
     let mut sorted = stamps.clone();
     sorted.sort_unstable();
     assert_eq!(stamps, sorted, "samples are written oldest-first");
@@ -974,4 +971,44 @@ fn an_empty_ledger_round_trips_to_nothing() {
     assert!(restored.samples.is_empty());
     assert_eq!(restored.total_cost, 0.0);
     assert_eq!(restored.total_tokens, 0);
+}
+
+#[test]
+fn the_accumulated_progress_comes_from_the_ledger_not_the_counters() {
+    // The progress figure used to be `stats.<class> - base_<class>`, which breaks the moment "reset
+    // data" zeroes the counters while a baseline survives: the subtraction then yields the whole
+    // counter value, i.e. a plausible-looking number that describes the wrong period. Reading the
+    // ledger makes the figure survive both a reset and a restart.
+    let mut l = crate::state::LocalLedger::default();
+    let t0 = ts("2026-09-01T00:00:00Z");
+    l.add_usage(t0 - 10, 9.0, 900, 800, 700, 100);
+    l.add_usage(t0 + 10, 1.0, 100, 80, 60, 20);
+    l.add_usage(t0 + 20, 2.0, 200, 150, 100, 50);
+
+    let (prompt, cached, completion) = l.usage_since(t0);
+    assert_eq!(prompt, 230, "only the samples at or after the baseline count");
+    assert_eq!(cached, 160);
+    assert_eq!(completion, 70);
+    assert_eq!(l.cost_since(t0), 3.0);
+
+    let restored = crate::state::LocalLedger::from_state_json(&l.to_state_json());
+    assert_eq!(restored.usage_since(t0), (prompt, cached, completion));
+    assert_eq!(restored.cost_since(t0), 3.0);
+}
+
+#[test]
+fn an_older_ledger_file_keeps_its_cost_and_totals() {
+    // Samples written before the per-class split existed have three fields. They must load with
+    // their money intact and report zero for the split, rather than being discarded.
+    let v = serde_json::json!({
+        "total_cost": 5.0,
+        "total_tokens": 500,
+        "samples": [[1700000000, 2.0, 200], [1700000100, 3.0, 300]],
+    });
+    let l = crate::state::LocalLedger::from_state_json(&v);
+    assert_eq!(l.samples.len(), 2, "old samples are not dropped");
+    assert_eq!(l.total_cost, 5.0);
+    assert_eq!(l.cost_since(1699999999), 5.0, "the money is real and kept");
+    assert_eq!(l.tokens_since(1699999999), 500);
+    assert_eq!(l.usage_since(1699999999), (0, 0, 0), "no split was recorded");
 }
