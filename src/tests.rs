@@ -767,6 +767,8 @@ fn calibration_state_round_trips_through_the_state_file() {
         verified_at: 1_700_200_000,
         residual_pp: 0.03,
         ref_pct_month: 44.0,
+        ref_pct_5h: 0.0,
+        ref_pct_week: 0.0,
         ref_at: 1_700_200_000,
     };
     let j = cal.to_json();
@@ -1144,6 +1146,8 @@ fn the_monthly_level_anchors_on_the_calibration_reference() {
         verified_at: 0,
         residual_pp: 0.0,
         ref_pct_month: 44.28,
+        ref_pct_5h: 0.0,
+        ref_pct_week: 0.0,
         ref_at: at("2026-09-21T13:04:00Z"),
     });
 
@@ -1177,6 +1181,8 @@ fn a_stale_reference_yields_to_the_new_cycle() {
         verified_at: 0,
         residual_pp: 0.0,
         ref_pct_month: 44.28,
+        ref_pct_5h: 0.0,
+        ref_pct_week: 0.0,
         ref_at: at("2026-09-21T13:04:00Z"),
     });
 
@@ -1186,4 +1192,51 @@ fn a_stale_reference_yields_to_the_new_cycle() {
         "the new cycle reads the ledger alone: 10 of 200 is 5%, got {}",
         r.monthly.pct,
     );
+}
+
+/// A derived bucket whose window began before the ledger did is anchored on the reference
+/// reading rather than suppressed: the console's percentage at the reference is the level, and
+/// the ledger adds everything since. The live case: a weekly bucket that opened 19 hours before
+/// the ledger started reading would otherwise have shown no data despite two accurate readings.
+#[test]
+fn a_derived_bucket_anchors_on_the_reference_when_the_ledger_starts_late() {
+    use crate::config::{QuotaCfg, QuotaUnit};
+    use crate::state::{LocalLedger, QuotaCalibration, QuotaState};
+
+    let at = |s: &str| timeutil::parse_iso8601(s).unwrap();
+    let cfg = QuotaCfg { unit: QuotaUnit::Rmb, monthly: 200.0, cycle_day: 26, ..QuotaCfg::default() };
+
+    // The weekly bucket opened 2026-09-20T15:28Z; the ledger only begins the next morning.
+    let mut q = QuotaState::default();
+    q.ledger = LocalLedger::default();
+    q.ledger.add(at("2026-09-21T13:30:00Z"), 1.0, 0);
+    q.anchors.bucket_5h = at("2026-09-21T17:29:00Z");
+    q.anchors.week_reset = at("2026-09-27T15:28:00Z");
+    q.calibration = Some(QuotaCalibration {
+        calibrated_at: at("2026-09-21T13:04:00Z"),
+        scale: 0.0812,
+        rolling_total: 13.24,
+        weekly_total: 99.39,
+        verified_at: 0,
+        residual_pp: 0.0,
+        ref_pct_month: 44.28,
+        ref_pct_5h: 12.24,
+        ref_pct_week: 17.55,
+        ref_at: at("2026-09-21T13:04:00Z"),
+    });
+
+    let j = q.to_json(at("2026-09-21T14:00:00Z"), &q.report(at("2026-09-21T14:00:00Z"), 3_600, 80.0, true, 99.0, &cfg), "", &crate::state::AccountStats::default());
+    // Weekly: 17.55% of 99.39 at the reference, plus the 1.0 forwarded since.
+    let week = j.get("weekly").unwrap();
+    let used = week.get("used").unwrap().as_f64().unwrap();
+    assert!(
+        (used - (99.39 * 0.1755 + 1.0)).abs() < 0.01,
+        "anchored on the reference reading, got {}",
+        used,
+    );
+    assert!((week.get("percent").unwrap().as_f64().unwrap() - 18.55).abs() < 0.1, "got {}", week.get("percent").unwrap());
+    // 5h bucket: 12.24% of 13.24 at the reference plus the 1.0 since.
+    let roll = j.get("rolling").unwrap();
+    let roll_used = roll.get("used").unwrap().as_f64().unwrap();
+    assert!((roll_used - (13.24 * 0.1224 + 1.0)).abs() < 0.01, "got {}", roll_used);
 }

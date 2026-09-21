@@ -448,10 +448,17 @@ pub struct QuotaCalibration {
     pub verified_at: i64,
     /// Predicted minus actual, in percentage points, from the last verification reading.
     pub residual_pp: f64,
-    /// The monthly percentage and moment of the reference reading, so a verification compares
-    /// deltas (pure forwarded traffic) rather than absolutes (which also contain usage the router
-    /// never saw, e.g. whatever was spent before the endpoint was configured).
+    /// The percentages and moment of the reference reading, so a verification compares deltas
+    /// (pure forwarded traffic) rather than absolutes (which also contain usage the router never
+    /// saw, e.g. whatever was spent before the endpoint was configured).
+    ///
+    /// These are also the level anchors for every derived window: the percentage the console
+    /// displayed at `ref_at` is ground truth for that instant, and everything after it is the
+    /// ledger's correctly-priced consumption. Nothing before the reference is ever needed again -
+    /// a ledger that began mid-cycle is as good as a complete one once the reference exists.
     pub ref_pct_month: f64,
+    pub ref_pct_5h: f64,
+    pub ref_pct_week: f64,
     pub ref_at: i64,
 }
 
@@ -465,6 +472,8 @@ impl QuotaCalibration {
             "verified_at": if self.verified_at > 0 { json!(self.verified_at) } else { Value::Null },
             "residual_pp": if self.verified_at > 0 { json!(self.residual_pp) } else { Value::Null },
             "ref_pct_month": self.ref_pct_month,
+            "ref_pct_5h": self.ref_pct_5h,
+            "ref_pct_week": self.ref_pct_week,
             "ref_at": self.ref_at,
         })
     }
@@ -486,6 +495,8 @@ impl QuotaCalibration {
             verified_at: gi("verified_at"),
             residual_pp: g("residual_pp"),
             ref_pct_month: g("ref_pct_month"),
+            ref_pct_5h: g("ref_pct_5h"),
+            ref_pct_week: g("ref_pct_week"),
             ref_at: gi("ref_at"),
         })
     }
@@ -840,22 +851,32 @@ impl QuotaState {
         };
         // The 5-hour and weekly buckets that a calibration derived are display-only: routing never
         // sees them (their config limits stay 0, so the report carries no data for them), so the
-        // views here are built straight from the derivation. A bucket-aligned sum is what makes the
-        // percentage agree with the provider's console; a sliding sum would not.
-        let derived_view = |total: f64, window: i64, next_reset: Option<i64>| -> Option<Value> {
+        // views here are built straight from the derivation. The reference instant is shared by
+        // all three windows: it is when the second reading was taken.
+        let ref_at = self.calibration.as_ref().map(|c| c.ref_at).unwrap_or(0);
+        //
+        // The level comes from the reference reading, not from a bucket-aligned sum: the console's
+        // percentage at `ref_at` is ground truth for that instant, and the ledger adds everything
+        // forwarded since. Summing the bucket instead would need the ledger to cover the whole
+        // bucket, which a mid-cycle ledger never does for the first week. Once the bucket rolls
+        // over past the reference, the sum is both available and exact, so it takes over.
+        let derived_view = |total: f64, window: i64, next_reset: Option<i64>, ref_pct: f64| -> Option<Value> {
             let reset = next_reset?;
             if total <= 0.0 || reset <= now {
                 return None;
             }
             let start = reset - window;
-            // A bucket-aligned sum is only as long as the ledger: when the ledger began inside
-            // this bucket, the sum is short by everything before that, and the percentage would
-            // undercount until the bucket has fully rolled over. The plain view reports no data
-            // rather than a number the console contradicts.
-            if self.ledger.samples.front().map(|s| s.ts).is_some_and(|first| first > start) {
-                return None;
-            }
-            let used = self.ledger.cost_since(start);
+            let ref_inside = ref_pct > 0.0 && ref_at > 0 && ref_at >= start && ref_at < reset;
+            let used = if ref_inside {
+                total * ref_pct / 100.0 + self.ledger.cost_since(ref_at)
+            } else {
+                // No reference in this bucket: fall back to the bucket sum, which is only honest
+                // when the ledger reaches the bucket's start.
+                if self.ledger.samples.front().map(|s| s.ts).is_some_and(|first| first > start) {
+                    return None;
+                }
+                self.ledger.cost_since(start)
+            };
             let pct = (used / total * 100.0).clamp(0.0, 999.0);
             Some(json!({
                 "percent": (pct * 10.0).round() / 10.0,
@@ -868,14 +889,14 @@ impl QuotaState {
         };
         let rolling_view = match &self.calibration {
             Some(c) => {
-                derived_view(c.rolling_total, PERIOD_ROLLING, roll_forward(self.anchors.bucket_5h, PERIOD_ROLLING, now))
+                derived_view(c.rolling_total, PERIOD_ROLLING, roll_forward(self.anchors.bucket_5h, PERIOD_ROLLING, now), c.ref_pct_5h)
                     .unwrap_or_else(|| w(&report.rolling))
             }
             None => w(&report.rolling),
         };
         let weekly_view = match &self.calibration {
             Some(c) => {
-                derived_view(c.weekly_total, PERIOD_WEEKLY, roll_forward(self.anchors.week_reset, PERIOD_WEEKLY, now))
+                derived_view(c.weekly_total, PERIOD_WEEKLY, roll_forward(self.anchors.week_reset, PERIOD_WEEKLY, now), c.ref_pct_week)
                     .unwrap_or_else(|| w(&report.weekly))
             }
             None => w(&report.weekly),

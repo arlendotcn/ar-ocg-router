@@ -1195,6 +1195,10 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
                 verified_at: 0,
                 residual_pp: 0.0,
                 ref_pct_month: pm,
+                // The shorter windows anchor the same way: their percentages at this instant are
+                // the level, and the ledger adds everything after it.
+                ref_pct_5h: p5,
+                ref_pct_week: pw,
                 ref_at: t2,
             };
             // The derivation succeeded: now, and only now, the pending reading is consumed.
