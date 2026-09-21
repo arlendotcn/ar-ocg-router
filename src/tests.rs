@@ -924,3 +924,54 @@ fn account_stats_serialise_in_flight_with_its_diagnostic_floor() {
     assert_eq!(rt.in_flight(), 0);
     assert_eq!(rt.in_flight_raw(), 0);
 }
+
+// ----------------------------------------------------------- ledger round trip
+
+#[test]
+fn the_ledger_keeps_the_window_a_calibration_reads_from() {
+    // A calibration measures `cost_between(baseline, now)`. If persisting the ledger dropped the
+    // samples between those two instants, that difference would come out short and the derived
+    // scale too large - a wrong answer rather than a rounding error. The whole retained window has
+    // to survive a save/load cycle.
+    let mut l = crate::state::LocalLedger::default();
+    let start = 1_700_000_000i64;
+    for i in 0..5_000i64 {
+        l.add(start + i, 1.0, 100);
+    }
+    // Baseline two thirds of the way in; everything after it is what a calibration would measure.
+    let baseline = start + 2_000;
+    let before = l.cost_between(baseline, start + 5_000);
+    assert_eq!(before, 3_000.0, "3000 samples at 1.0 each after the baseline");
+
+    let restored = crate::state::LocalLedger::from_state_json(&l.to_state_json());
+    assert_eq!(
+        restored.cost_between(baseline, start + 5_000),
+        before,
+        "the persisted ledger must answer the same question as the in-memory one"
+    );
+    assert_eq!(restored.total_cost, l.total_cost);
+}
+
+#[test]
+fn the_ledger_stays_in_time_order_across_a_restart() {
+    let mut l = crate::state::LocalLedger::default();
+    let start = 1_700_000_000i64;
+    for i in 0..50i64 {
+        l.add(start + i, 0.5, 10);
+    }
+    let restored = crate::state::LocalLedger::from_state_json(&l.to_state_json());
+    let stamps: Vec<i64> = restored.samples.iter().map(|(ts, _, _)| *ts).collect();
+    let mut sorted = stamps.clone();
+    sorted.sort_unstable();
+    assert_eq!(stamps, sorted, "samples are written oldest-first");
+    assert_eq!(restored.samples.len(), 50);
+}
+
+#[test]
+fn an_empty_ledger_round_trips_to_nothing() {
+    let l = crate::state::LocalLedger::default();
+    let restored = crate::state::LocalLedger::from_state_json(&l.to_state_json());
+    assert!(restored.samples.is_empty());
+    assert_eq!(restored.total_cost, 0.0);
+    assert_eq!(restored.total_tokens, 0);
+}

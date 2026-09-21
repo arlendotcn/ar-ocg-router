@@ -134,7 +134,18 @@ pub struct LocalLedger {
 /// How many samples are written to the state file. The live ledger keeps far more, but the file is
 /// rewritten every few seconds, and a sliding window never reaches back further than a month: 2000
 /// samples cover any realistic request rate while keeping the file small.
-const PERSISTED_SAMPLES: usize = 2000;
+/// How many ledger samples are written to the state file.
+///
+/// This used to be 2000 as a size cap. That was wrong: the calibration reads consumption as
+/// `cost_between(baseline, now)`, and a truncated history makes that difference too small whenever
+/// the baseline sits before the retained tail. The derived scale then comes out too large and the
+/// whole ledger is rescaled by it - a wrong answer, not a rounding error. The samples are the only
+/// record of *when* money was spent, so they have to survive restarts intact.
+///
+/// 20 000 samples is roughly 1 MB of JSON at typical sizes and covers a month of ordinary console
+/// traffic with room to spare; beyond it the oldest samples are dropped, which degrades the rolling
+/// windows oldest-first (exactly the ones that no longer matter).
+const PERSISTED_SAMPLES: usize = 20_000;
 
 /// How long an in-flight mark may stay set before it is treated as debris rather than traffic.
 ///
@@ -153,12 +164,14 @@ impl LocalLedger {
     /// same file, so a memory-only ledger only meant two numbers on one screen counted different
     /// periods (the dashboard showed a lifetime total, the quota decision a since-restart one).
     pub fn to_state_json(&self) -> Value {
+        // Written oldest-first so the file stays readable in time order, and every sample that
+        // survives the in-memory window is written - see PERSISTED_SAMPLES for why dropping the
+        // old ones is not an option.
+        let keep = self.samples.len().min(PERSISTED_SAMPLES);
         let samples: Vec<Value> = self
             .samples
             .iter()
-            .rev()
-            .take(PERSISTED_SAMPLES)
-            .rev()
+            .skip(self.samples.len() - keep)
             .map(|(ts, cost, tokens)| json!([ts, cost, tokens]))
             .collect();
         json!({
@@ -194,7 +207,10 @@ impl LocalLedger {
         self.samples.push_back((now, cost, tokens));
         self.total_cost += cost;
         self.total_tokens += tokens;
-        if self.samples.len() > 100_000 {
+        // The in-memory cap and the persisted cap are the same number on purpose. If memory kept
+        // more than the file accepts, a long-running process would answer from a longer history
+        // than a restarted one and the two would disagree about the same baseline.
+        while self.samples.len() > PERSISTED_SAMPLES {
             self.samples.pop_front();
         }
         let cutoff = now - 31 * 86400;
