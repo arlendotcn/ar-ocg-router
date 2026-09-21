@@ -1119,3 +1119,71 @@ fn a_sliding_window_still_reports_no_projection() {
     assert_eq!(r.monthly.resets_at, None);
     assert_eq!(r.monthly.projected_pct, r.monthly.pct);
 }
+
+/// A calibration reference replaces the ledger for the monthly level. The live case: a ledger
+/// rebuilt mid-cycle held only 1.9 hours of history while the console counted the whole cycle,
+/// so after a derivation the monthly percentage read 4.4% against the console's 44.28%.
+#[test]
+fn the_monthly_level_anchors_on_the_calibration_reference() {
+    use crate::config::{QuotaCfg, QuotaUnit};
+    use crate::state::{LocalLedger, QuotaCalibration, QuotaState};
+
+    let at = |s: &str| timeutil::parse_iso8601(s).unwrap();
+    let cfg = QuotaCfg { unit: QuotaUnit::Rmb, monthly: 200.0, cycle_day: 26, ..QuotaCfg::default() };
+
+    // The cycle began 2026-08-26, but the ledger only starts mid-cycle. The provider said 44.28%
+    // at the reference instant; the ledger then recorded 1.0 more.
+    let mut q = QuotaState::default();
+    q.ledger = LocalLedger::default();
+    q.ledger.add(at("2026-09-21T13:30:00Z"), 1.0, 0);
+    q.calibration = Some(QuotaCalibration {
+        calibrated_at: at("2026-09-21T13:04:00Z"),
+        scale: 0.0812,
+        rolling_total: 13.24,
+        weekly_total: 99.39,
+        verified_at: 0,
+        residual_pp: 0.0,
+        ref_pct_month: 44.28,
+        ref_at: at("2026-09-21T13:04:00Z"),
+    });
+
+    let r = q.report(at("2026-09-21T14:00:00Z"), 3_600, 80.0, true, 99.0, &cfg);
+    assert!(
+        (r.monthly.pct - 44.78).abs() < 0.01,
+        "44.28% at the reference plus 1.0 of 200 is 44.78%, got {}",
+        r.monthly.pct,
+    );
+    assert!((r.monthly.used - 89.56).abs() < 0.01, "got {}", r.monthly.used);
+}
+
+/// Once the cycle rolls over the reference describes a window that no longer exists, and the
+/// ledger - which by then has covered the new cycle from its start - takes over.
+#[test]
+fn a_stale_reference_yields_to_the_new_cycle() {
+    use crate::config::{QuotaCfg, QuotaUnit};
+    use crate::state::{LocalLedger, QuotaCalibration, QuotaState};
+
+    let at = |s: &str| timeutil::parse_iso8601(s).unwrap();
+    let cfg = QuotaCfg { unit: QuotaUnit::Rmb, monthly: 200.0, cycle_day: 26, ..QuotaCfg::default() };
+
+    let mut q = QuotaState::default();
+    q.ledger = LocalLedger::default();
+    q.ledger.add(at("2026-09-26T00:00:01Z"), 10.0, 0);
+    q.calibration = Some(QuotaCalibration {
+        calibrated_at: at("2026-09-21T13:04:00Z"),
+        scale: 0.0812,
+        rolling_total: 13.24,
+        weekly_total: 99.39,
+        verified_at: 0,
+        residual_pp: 0.0,
+        ref_pct_month: 44.28,
+        ref_at: at("2026-09-21T13:04:00Z"),
+    });
+
+    let r = q.report(at("2026-09-26T01:00:00Z"), 3_600, 80.0, true, 99.0, &cfg);
+    assert!(
+        (r.monthly.pct - 5.0).abs() < 1e-6,
+        "the new cycle reads the ledger alone: 10 of 200 is 5%, got {}",
+        r.monthly.pct,
+    );
+}

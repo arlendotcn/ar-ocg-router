@@ -737,13 +737,27 @@ impl QuotaState {
             QuotaUnit::Tokens => self.ledger.tokens_since(from) as f64,
             QuotaUnit::None => 0.0,
         };
-        let local = |period: i64, limit: f64| -> Option<(f64, f64)> {
+        let local = |period: i64, limit: f64, ref_anchor: Option<(i64, f64)>| -> Option<(f64, f64)> {
             if limit <= 0.0 || quota.unit == QuotaUnit::None {
                 return None;
             }
             // Inside a fixed cycle the window runs from the cycle start, not a trailing period.
+            //
+            // A calibration reference replaces the ledger's own history for the level: the ledger
+            // only reaches back to when it started recording, while the provider's console counts
+            // the whole cycle, so summing the ledger from the cycle start undercounts by everything
+            // that happened before the router first saw traffic (an entire month, when the ledger
+            // was rebuilt mid-cycle). The provider's reading at `ref_at` is the level's ground
+            // truth; the ledger adds what it forwarded since. Once the cycle rolls over, the
+            // reference describes a window that no longer exists and the plain sum takes over -
+            // by then the ledger has covered that new cycle from its start.
             let used = match cycle {
-                Some((cyc_start, _)) => ledger_sum(cyc_start),
+                Some((cyc_start, _)) => match ref_anchor {
+                    Some((ref_at, ref_pct)) if ref_at >= cyc_start => {
+                        limit * ref_pct / 100.0 + ledger_sum(ref_at)
+                    }
+                    _ => ledger_sum(cyc_start),
+                },
                 None => ledger_sum(now - period),
             };
             if used <= 0.0 && !trust_empty_ledger {
@@ -751,9 +765,17 @@ impl QuotaState {
             }
             Some((used, (used / limit * 100.0).clamp(0.0, 999.0)))
         };
-        let lp_rolling = local(PERIOD_ROLLING, quota.rolling);
-        let lp_weekly = local(PERIOD_WEEKLY, quota.weekly);
-        let lp_monthly = local(PERIOD_MONTHLY, quota.monthly);
+        let lp_rolling = local(PERIOD_ROLLING, quota.rolling, None);
+        let lp_weekly = local(PERIOD_WEEKLY, quota.weekly, None);
+        // The monthly window anchors on the calibration reference when one is live: the ledger
+        // sums only what it saw, and a ledger that began mid-cycle cannot know the level.
+        let ref_anchor = match &self.calibration {
+            Some(c) if c.ref_pct_month > 0.0 && c.ref_at > 0 && c.scale > 0.0 => {
+                Some((c.ref_at, c.ref_pct_month))
+            }
+            _ => None,
+        };
+        let lp_monthly = local(PERIOD_MONTHLY, quota.monthly, ref_anchor);
         let has_local = lp_rolling.is_some() || lp_weekly.is_some() || lp_monthly.is_some();
 
         // Only the monthly window has a cycle; the shorter windows stay rolling sums.
@@ -826,6 +848,13 @@ impl QuotaState {
                 return None;
             }
             let start = reset - window;
+            // A bucket-aligned sum is only as long as the ledger: when the ledger began inside
+            // this bucket, the sum is short by everything before that, and the percentage would
+            // undercount until the bucket has fully rolled over. The plain view reports no data
+            // rather than a number the console contradicts.
+            if self.ledger.samples.front().map(|s| s.ts).is_some_and(|first| first > start) {
+                return None;
+            }
             let used = self.ledger.cost_since(start);
             let pct = (used / total * 100.0).clamp(0.0, 999.0);
             Some(json!({
