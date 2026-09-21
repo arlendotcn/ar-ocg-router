@@ -318,6 +318,10 @@ fn stats_json(state: &Arc<AppState>) -> Value {
             // pool. Without this the dashboard could only guess from the available flag, which is
             // about cooldowns and quota, not about the enable switch.
             obj.insert("enabled".to_string(), json!(acc.cfg.is_enabled()));
+            obj.insert(
+                "in_flight".to_string(),
+                json!(acc.rt.in_flight.load(Ordering::Relaxed)),
+            );
         }
         acc_json.push(v);
     }
@@ -811,6 +815,9 @@ fn proxy(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
             call = call.set(k, v);
         }
 
+        // From here to the end of the attempt the endpoint is in use - including the whole stream,
+        // which is exactly the window the completion-time statistics cannot see.
+        let _in_flight = acc.rt.in_flight_guard();
         let started = Instant::now();
         log_info!(
             "[{}] -> {} {} model={} stream={} ({})",

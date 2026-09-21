@@ -572,7 +572,14 @@ function AccountRow({
               </Badge>
             </span>
             <span className="mono mt-0.5 block truncate text-2xs text-[var(--ink-faint)]">
-              {a.provider} · {a.model ?? "—"} · {fmtNum(a.stats.requests)} req · {fmtAgo(a.stats.last_used, lang)}
+              {a.provider} · {a.model ?? "—"} · {fmtNum(a.stats.requests)} req ·{" "}
+              {a.in_flight && a.in_flight > 0 ? (
+                <span style={{ color: "var(--signal)" }}>
+                  {t.dash.inFlight.replace("{n}", String(a.in_flight))}
+                </span>
+              ) : (
+                fmtAgo(a.stats.last_used, lang)
+              )}
             </span>
           </span>
           <span className="hidden w-[150px] shrink-0 sm:block">

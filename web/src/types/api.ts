@@ -84,6 +84,9 @@ export type Account = {
     last_reason: string | null;
   };
   enabled?: boolean;
+  /** Requests dispatched upstream but not finished. A long stream sits here for its whole
+   *  duration, invisible to the completion-time counters. */
+  in_flight?: number;
   managed?: boolean;
   extra_headers?: Record<string, string>;
   drop_params?: string[];

@@ -807,6 +807,10 @@ pub struct AccountRuntime {
     pub models: Mutex<Option<(i64, Vec<String>)>>,
     pub cooldown_until: AtomicI64,
     pub cooldown_reason: Mutex<Option<String>>,
+    /// Requests dispatched upstream but not yet finished. A long stream is invisible in the
+    /// completion-time statistics for its whole duration, which reads as "this endpoint has been
+    /// idle for minutes" while it is in fact mid-generation.
+    pub in_flight: AtomicI64,
 
 }
 
@@ -820,6 +824,7 @@ impl AccountRuntime {
             models: Mutex::new(None),
             cooldown_until: AtomicI64::new(0),
             cooldown_reason: Mutex::new(None),
+            in_flight: AtomicI64::new(0),
 
         }
     }
@@ -890,6 +895,21 @@ impl AccountRuntime {
         if let Ok(mut q) = self.quota.lock() {
             q.anchors = a;
         }
+    }
+
+    /// Mark a request as dispatched upstream. The returned guard clears it on drop, so every exit
+    /// path - success, upstream error, client abort - is covered by construction.
+    ///
+    /// This exists because the completion-time statistics are blind for the whole duration of a
+    /// stream: a request that runs for a minute shows nothing anywhere, and the endpoint reads as
+    /// idle while it is mid-generation.
+    pub fn in_flight_guard(&self) -> crate::state::InFlightGuard<'_> {
+        self.in_flight.fetch_add(1, Ordering::Relaxed);
+        crate::state::InFlightGuard { rt: self }
+    }
+
+    pub fn in_flight(&self) -> i64 {
+        self.in_flight.load(Ordering::Relaxed)
     }
 
     pub fn calibration(&self) -> Option<QuotaCalibration> {
@@ -1218,6 +1238,17 @@ pub fn stats_snapshot(state: &crate::proxy::AppState) -> HashMap<String, Account
         }
     }
     out
+}
+
+/// Clears one in-flight mark on drop. Held for the whole upstream request, stream included.
+pub struct InFlightGuard<'a> {
+    rt: &'a AccountRuntime,
+}
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.rt.in_flight.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// Account = immutable config + shared runtime state.
