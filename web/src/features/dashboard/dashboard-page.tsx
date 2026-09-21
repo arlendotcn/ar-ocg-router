@@ -30,6 +30,10 @@ export function DashboardPage() {
   // hang over the plates below on a phone, and window.confirm would take the decision off screen.
   const [resetArmed, setResetArmed] = React.useState(false);
   const [resetting, setResetting] = React.useState(false);
+  // A pending quota calibration is cleared by a statistics reset (its baseline counters are zeroed
+  // with everything else), so the armed reset must say so before the user confirms.
+  const calPending =
+    stats?.accounts.some((a) => a.quota.calibration?.pending != null) ?? false;
 
   const setEndpointEnabled = async (name: string, enabled: boolean) => {
     setBusy(name);
@@ -154,20 +158,23 @@ export function DashboardPage() {
               )}
             </span>
             {/* Reset sits next to the switch but is not another way to refresh: it destroys data.
-                Armed state carries the warning colour so it cannot be mistaken for the normal button. */}
+                Armed state carries the warning colour so it cannot be mistaken for the normal button.
+                A pending quota calibration is also cleared by a reset, so while one is running the
+                confirm is disabled and the user is pointed at cancelling it first. */}
             {resetArmed ? (
               <span className="flex items-center gap-1.5">
                 <span className="max-w-[13rem] text-2xs leading-snug text-[var(--warn)] sm:max-w-none">
-                  {t.dash.resetStatsTitle}
+                  {calPending ? t.dash.resetBlockedByCal : t.dash.resetStatsTitle}
                 </span>
                 <Button
                   size="sm"
                   variant="outline"
-                  disabled={resetting}
+                  disabled={resetting || calPending}
                   onClick={() => void resetStats()}
-                  className="border-[var(--warn)] text-[var(--warn)] hover:bg-[var(--warn)]/15"
+                  className={cn("border-[var(--warn)] text-[var(--warn)] hover:bg-[var(--warn)]/15",
+                    calPending && "opacity-50")}
                 >
-                  {t.common.confirm}
+                  {calPending ? t.dash.resetBlocked : t.common.confirm}
                 </Button>
                 <Button size="sm" variant="ghost" disabled={resetting} onClick={() => setResetArmed(false)}>
                   {t.common.cancel}
