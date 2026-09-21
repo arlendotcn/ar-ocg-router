@@ -162,6 +162,9 @@ export function CalibrationWizard({
   const [localAnchors, setLocalAnchors] = React.useState<{ bucket_5h: number; week_reset: number } | null>(null);
 
   const cal = useCalibration(endpoint);
+  // A derivation is only real if it was stamped: the phantom all-zero object an earlier load bug
+  // could write must not drive the status badge, the results block, or the verifier.
+  const derived = cal.derived && cal.derived.calibrated_at > 0 ? cal.derived : null;
   React.useEffect(() => {
     if (!localAnchors) return;
     const fresh = cal.anchors;
@@ -230,8 +233,8 @@ export function CalibrationWizard({
         <span className="mono text-xs uppercase tracking-[0.16em]">{t.endpoints.calTitle}</span>
         <span className="flex items-center gap-2">
           <span className="mono text-2xs text-[var(--ink-faint)]">
-            {cal.derived
-              ? cal.derived.verified_at
+            {derived
+              ? derived.verified_at
                 ? t.endpoints.calStateVerified
                 : t.endpoints.calStateDerived
               : cal.pending
@@ -280,25 +283,25 @@ export function CalibrationWizard({
             <div className="text-2xs text-[var(--ink-faint)]">{t.endpoints.calAnchorsHint}</div>
           </div>
 
-          {cal.derived ? (
+          {derived ? (
             <div className="space-y-1.5 rounded-[2px] border border-[var(--line)] bg-[var(--panel)] p-2.5">
               <div className="label">{t.endpoints.calDerived}</div>
               <div className="mono text-xs text-[var(--ink)]">
-                {t.endpoints.calScale.replace("{n}", cal.derived.scale.toFixed(4))}
+                {t.endpoints.calScale.replace("{n}", derived.scale.toFixed(4))}
               </div>
-              {cal.derived.rolling_total > 0 ? (
+              {derived.rolling_total > 0 ? (
                 <div className="mono text-xs">
-                  {t.endpoints.calTotal5h.replace("{n}", cal.derived.rolling_total.toFixed(2))}
+                  {t.endpoints.calTotal5h.replace("{n}", derived.rolling_total.toFixed(2))}
                 </div>
               ) : null}
-              {cal.derived.weekly_total > 0 ? (
+              {derived.weekly_total > 0 ? (
                 <div className="mono text-xs">
-                  {t.endpoints.calTotalWeek.replace("{n}", cal.derived.weekly_total.toFixed(2))}
+                  {t.endpoints.calTotalWeek.replace("{n}", derived.weekly_total.toFixed(2))}
                 </div>
               ) : null}
-              {cal.derived.verified_at ? (
+              {derived.verified_at ? (
                 <div className="mono text-2xs text-[var(--up)]">
-                  {t.endpoints.calVerified.replace("{n}", (cal.derived.residual_pp ?? 0).toFixed(3))}
+                  {t.endpoints.calVerified.replace("{n}", (derived.residual_pp ?? 0).toFixed(3))}
                 </div>
               ) : (
                 <div className="text-2xs text-[var(--ink-faint)]">{t.endpoints.calUnverified}</div>
@@ -422,7 +425,7 @@ export function CalibrationWizard({
           {/* Only for a real derivation: an all-zero object resurrected by a state-file round trip
               is not a result, and rendering a verifier for it invites entering numbers against
               nothing. */}
-          {cal.derived && cal.derived.calibrated_at > 0 ? (
+          {derived ? (
             <div className="space-y-2 border-t border-[var(--line)] pt-3">
               <div className="label">{t.endpoints.calVerifyTitle}</div>
               <div className="text-2xs leading-relaxed text-[var(--ink-dim)]">{t.endpoints.calVerifyHint}</div>

@@ -393,10 +393,16 @@ impl QuotaCalibration {
     }
     pub fn from_json(v: &Value) -> Option<QuotaCalibration> {
         let o = v.as_object()?;
-        let g = |k: &str| o.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
         let gi = |k: &str| o.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+        let calibrated_at = gi("calibrated_at");
+        // A derivation is stamped when it completes; an entry without that stamp is a phantom
+        // (e.g. resurrected from a null by an earlier load bug) and must not come back.
+        if calibrated_at <= 0 {
+            return None;
+        }
+        let g = |k: &str| o.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
         Some(QuotaCalibration {
-            calibrated_at: gi("calibrated_at"),
+            calibrated_at,
             scale: g("scale"),
             rolling_total: g("rolling_total"),
             weekly_total: g("weekly_total"),
