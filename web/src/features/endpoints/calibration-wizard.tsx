@@ -10,6 +10,61 @@ import { cn } from "@/lib/utils";
 import type { EndpointCfg, QuotaCalibration, QuotaReading } from "@/types/api";
 
 /**
+ * A "resets in ..." countdown as three small boxes: days, hours, minutes.
+ *
+ * One box holding raw seconds was unusable - the value displayed a unit the user was not typing in,
+ * so every keystroke re-scaled the number under the cursor. Three boxes each show the unit they
+ * collect, and the stored value stays in seconds. `withDays` is off for the 5-hour bucket, which
+ * never spans a day.
+ */
+function CountdownInput({
+  seconds,
+  withDays,
+  onChange,
+}: {
+  seconds: number;
+  withDays: boolean;
+  onChange: (seconds: number) => void;
+}) {
+  const { t } = useI18n();
+  const s = Math.max(0, Math.round(seconds));
+  const parts = {
+    d: withDays ? Math.floor(s / 86400) : 0,
+    h: Math.floor((s % 86400) / 3600),
+    m: Math.floor((s % 3600) / 60),
+  };
+  const setPart = (part: "d" | "h" | "m", value: number) => {
+    const v = Math.max(0, Math.floor(value) || 0);
+    const next = { ...parts, [part]: v };
+    onChange(next.d * 86400 + next.h * 3600 + next.m * 60);
+  };
+  const box = (part: "d" | "h" | "m", label: string, max?: number) => (
+    <Input
+      type="number"
+      min={0}
+      max={max}
+      aria-label={label}
+      value={parts[part] || ""}
+      onChange={(e) => setPart(part, Number(e.target.value))}
+    />
+  );
+  return (
+    <div className="flex items-center gap-1">
+      {withDays ? (
+        <>
+          <div className="w-[52px]">{box("d", t.endpoints.calUnitDays)}</div>
+          <span className="text-2xs text-[var(--ink-faint)]">{t.endpoints.calUnitDayShort}</span>
+        </>
+      ) : null}
+      <div className="w-[52px]">{box("h", t.endpoints.calUnitHours)}</div>
+      <span className="text-2xs text-[var(--ink-faint)]">{t.endpoints.calUnitHourShort}</span>
+      <div className="w-[52px]">{box("m", t.endpoints.calUnitMinutes)}</div>
+      <span className="text-2xs text-[var(--ink-faint)]">{t.endpoints.calUnitMinuteShort}</span>
+    </div>
+  );
+}
+
+/**
  * Derive a plan's real allowance when the provider exposes no usage API.
  *
  * The console shows only percentages, and the router only sees the traffic it forwarded. Two
@@ -53,8 +108,6 @@ export function CalibrationWizard({
     }
   };
 
-  const minutes = (v: number) => Math.max(0, Math.round(v * 60));
-
   const readFields = (
     label: string,
     v: typeof blank,
@@ -82,16 +135,16 @@ export function CalibrationWizard({
           <div className="text-2xs text-[var(--ink-faint)]">{t.endpoints.calCountdownHint}</div>
           <div className="grid grid-cols-3 gap-2">
             <Field label={t.endpoints.calReset5h}>
-              <Input type="number" min={0} value={v.cd_5h || ""}
-                onChange={(e) => set({ ...v, cd_5h: minutes(Number(e.target.value) || 0) })} />
+              <CountdownInput seconds={v.cd_5h} withDays={false}
+                onChange={(secs) => set({ ...v, cd_5h: secs })} />
             </Field>
             <Field label={t.endpoints.calResetWeek}>
-              <Input type="number" min={0} value={v.cd_week || ""}
-                onChange={(e) => set({ ...v, cd_week: minutes(Number(e.target.value) || 0) })} />
+              <CountdownInput seconds={v.cd_week} withDays
+                onChange={(secs) => set({ ...v, cd_week: secs })} />
             </Field>
             <Field label={t.endpoints.calResetMonth}>
-              <Input type="number" min={0} value={v.cd_month || ""}
-                onChange={(e) => set({ ...v, cd_month: minutes(Number(e.target.value) || 0) })} />
+              <CountdownInput seconds={v.cd_month} withDays
+                onChange={(secs) => set({ ...v, cd_month: secs })} />
             </Field>
           </div>
         </>
