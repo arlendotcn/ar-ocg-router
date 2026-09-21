@@ -40,30 +40,39 @@ function CountdownInput({
     const next = { ...parts, [part]: v };
     onChange(next.d * 86400 + next.h * 3600 + next.m * 60);
   };
-  const box = (part: "d" | "h" | "m", label: string, max?: number) => (
-    <Input
-      type="number"
-      min={0}
-      max={max}
-      aria-label={label}
-      value={parts[part] || ""}
-      onChange={(e) => setPart(part, Number(e.target.value))}
-    />
+  // Each part is its own labelled cell: an inline "3 boxes + unit text" row squeezed the inputs
+  // into 52px, which is narrower than a two-digit number plus its spin button.
+  const box = (part: "d" | "h" | "m", label: string) => (
+    <label className="block">
+      <span className="mono mb-0.5 block text-2xs text-[var(--ink-faint)]">{label}</span>
+      <Input
+        type="number"
+        min={0}
+        aria-label={label}
+        value={parts[part] || ""}
+        onChange={(e) => setPart(part, Number(e.target.value))}
+      />
+    </label>
   );
   return (
-    <div className="flex items-center gap-1">
-      {withDays ? (
-        <>
-          <div className="w-[52px]">{box("d", t.endpoints.calUnitDays)}</div>
-          <span className="text-2xs text-[var(--ink-faint)]">{t.endpoints.calUnitDayShort}</span>
-        </>
-      ) : null}
-      <div className="w-[52px]">{box("h", t.endpoints.calUnitHours)}</div>
-      <span className="text-2xs text-[var(--ink-faint)]">{t.endpoints.calUnitHourShort}</span>
-      <div className="w-[52px]">{box("m", t.endpoints.calUnitMinutes)}</div>
-      <span className="text-2xs text-[var(--ink-faint)]">{t.endpoints.calUnitMinuteShort}</span>
+    <div className={cn("grid gap-1.5", withDays ? "grid-cols-3" : "grid-cols-2")}>
+      {withDays ? box("d", t.endpoints.calUnitDayShort) : null}
+      {box("h", t.endpoints.calUnitHourShort)}
+      {box("m", t.endpoints.calUnitMinuteShort)}
     </div>
   );
+}
+
+/**
+ * Remaining seconds until an absolute anchor.
+ *
+ * The stored anchors are immediate instants (the console's countdown resolved at the moment it was
+ * entered), not durations. Feeding one straight into the boxes showed days-since-1970: the field
+ * must display how long is left, and send the re-entered duration back.
+ */
+function remainingSeconds(anchor: number): number {
+  if (anchor <= 0) return 0;
+  return Math.max(0, anchor - Math.floor(Date.now() / 1000));
 }
 
 /** The wizard's live state comes from the statistics stream, not the config draft: it lives in
@@ -112,9 +121,12 @@ const PctRow = ({
  *  editable at any time and apply the moment they arrive. */
 export function CalibrationWizard({
   endpoint,
+  onCycleDay,
   onDone,
 }: {
   endpoint: EndpointCfg;
+  /** Edits the draft's `quota.cycle_day`; the endpoint is saved as usual, since it is config. */
+  onCycleDay: (day: number) => void;
   onDone: () => void;
 }) {
   const { t } = useI18n();
@@ -125,9 +137,30 @@ export function CalibrationWizard({
   const blank = { pct_5h: 0, pct_week: 0, pct_month: 0 };
   const [base, setBase] = React.useState(blank);
   const [current, setCurrent] = React.useState(blank);
-  const [cd, setCd] = React.useState({ cd_5h: 0, cd_week: 0 });
+  // Anchor edits go through the API and come back on the statistics poll, so for up to five
+  // seconds the panel would show the value from before the edit and appear to reject it. These
+  // hold the user's own numbers until the server reports them back.
+  const [localAnchors, setLocalAnchors] = React.useState<{ bucket_5h: number; week_reset: number } | null>(null);
 
   const cal = useCalibration(endpoint);
+  React.useEffect(() => {
+    if (!localAnchors) return;
+    const fresh = cal.anchors;
+    // Once the server's value agrees with what was sent, the local override is no longer needed.
+    if (Math.abs(fresh.bucket_5h - localAnchors.bucket_5h) <= 2 && Math.abs(fresh.week_reset - localAnchors.week_reset) <= 2) {
+      setLocalAnchors(null);
+    }
+  }, [cal.anchors, localAnchors]);
+  const anchors = localAnchors ?? cal.anchors;
+
+  const sendAnchors = (bucket_5h: number, week_reset: number) => {
+    const sent = {
+      bucket_5h: bucket_5h > 0 ? Math.floor(Date.now() / 1000) + bucket_5h : 0,
+      week_reset: week_reset > 0 ? Math.floor(Date.now() / 1000) + week_reset : 0,
+    };
+    setLocalAnchors(sent);
+    void run("anchors", { cd_5h: bucket_5h, cd_week: week_reset });
+  };
   const pending = cal.pending;
   const acc = pending?.accumulated;
   // The reveal gate is advisory: enough traffic that a derivation has a chance. The server's
@@ -136,13 +169,19 @@ export function CalibrationWizard({
   const monthly = endpoint.quota.monthly;
   const hintReady = monthly > 0 && (acc?.cost ?? 0) >= monthly * 0.003;
 
-  const run = async (stage: string, body: Record<string, unknown>) => {
+  /**
+   * `close` is only for the stage that rewrites the endpoint's own config (`finish` writes the
+   * derived prices back, which makes the open draft stale). Everything else - anchors above all -
+   * must leave the panel open: the wizard reads its live state from the statistics stream, so it
+   * refreshes itself, and closing on every countdown keystroke made the section impossible to use.
+   */
+  const run = async (stage: string, body: Record<string, unknown>, close = false) => {
     setBusy(true);
     setError(null);
     try {
       const res = await api.calibrate(endpoint.name, { stage, ...body });
       setResult(res);
-      onDone();
+      if (close) onDone();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -185,14 +224,32 @@ export function CalibrationWizard({
             <div className="label">{t.endpoints.calAnchorsTitle}</div>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               <Field label={t.endpoints.calReset5h}>
-                <CountdownInput seconds={cal.anchors.bucket_5h} withDays={false}
-                  onChange={(cd_5h) => void run("anchors", { cd_5h, cd_week: cal.anchors.week_reset })} />
+                <CountdownInput
+                  seconds={remainingSeconds(anchors.bucket_5h)}
+                  withDays={false}
+                  onChange={(cd_5h) => sendAnchors(cd_5h, remainingSeconds(anchors.week_reset))}
+                />
               </Field>
               <Field label={t.endpoints.calResetWeek}>
-                <CountdownInput seconds={cal.anchors.week_reset} withDays
-                  onChange={(cd_week) => void run("anchors", { cd_5h: cal.anchors.bucket_5h, cd_week })} />
+                <CountdownInput
+                  seconds={remainingSeconds(anchors.week_reset)}
+                  withDays
+                  onChange={(cd_week) => sendAnchors(remainingSeconds(anchors.bucket_5h), cd_week)}
+                />
               </Field>
             </div>
+            {/* The monthly window's anchor is a config field rather than a countdown: the provider
+                resets on a day of the month, and the router can derive the instant from it. Kept here
+                so all three window anchors are edited in one place. */}
+            <Field label={t.endpoints.cycleDay} help={t.endpoints.cycleDayHint}>
+              <Input
+                type="number"
+                min={0}
+                max={31}
+                value={endpoint.quota.cycle_day}
+                onChange={(e) => onCycleDay(Math.min(31, Math.max(0, Number(e.target.value) || 0)))}
+              />
+            </Field>
             <div className="text-2xs text-[var(--ink-faint)]">{t.endpoints.calAnchorsHint}</div>
           </div>
 
@@ -265,7 +322,7 @@ export function CalibrationWizard({
                 labelMonth={t.endpoints.calMonth} v={current} set={setCurrent} />
               <div className="flex gap-2">
                 <Button size="sm" variant="primary" disabled={busy}
-                  onClick={() => void run("finish", current)}>
+                  onClick={() => void run("finish", current, true)}>
                   {t.endpoints.calDerive}
                 </Button>
                 <Button size="sm" variant="ghost" disabled={busy}

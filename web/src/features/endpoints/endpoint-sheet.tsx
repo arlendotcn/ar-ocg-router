@@ -332,7 +332,13 @@ export function EndpointSheet({
 
         {/* Calibrating writes to the running registry and the saved prices, so it only exists for an
             endpoint that already has a name on disk. */}
-        {endpoint && draft.name ? <CalibrationWizard endpoint={draft} onDone={onClose} /> : null}
+        {endpoint && draft.name ? (
+          <CalibrationWizard
+            endpoint={draft}
+            onCycleDay={(day) => setQuota("cycle_day", day)}
+            onDone={onClose}
+          />
+        ) : null}
 
         {/* ---------- advanced ---------- */}
         {/* Same plate as every other section, just collapsible: the fields inside are part of the

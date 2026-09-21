@@ -1055,9 +1055,12 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
             // the readings: they are the bucket model, not part of the derivation.
             let cd_5h = int_at(&doc, "cd_5h").unwrap_or(0).max(0);
             let cd_week = int_at(&doc, "cd_week").unwrap_or(0).max(0);
+            // Zero means "not known", so it must clear the anchor rather than store "resets right
+            // now" - an anchor sitting on the present instant would report a bucket that is always
+            // just about to roll over.
             rt.set_anchors(crate::state::QuotaAnchors {
-                bucket_5h: now + cd_5h,
-                week_reset: now + cd_week,
+                bucket_5h: if cd_5h > 0 { now + cd_5h } else { 0 },
+                week_reset: if cd_week > 0 { now + cd_week } else { 0 },
             });
             crate::persist::mark_dirty();
             json_response(
