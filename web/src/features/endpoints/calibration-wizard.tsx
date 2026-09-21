@@ -381,43 +381,42 @@ export function CalibrationWizard({
           </div>
 
           {/* ---- phase 2: the final reading, only once enough traffic has accrued ---- */}
-          {pending && ready ? (
-            <div className="space-y-2 border-t border-[var(--line)] pt-3">
-              <div className="label">{t.endpoints.calStep2}</div>
-              <PctRow label5h={t.endpoints.cal5h} labelWeek={t.endpoints.calWeek}
-                labelMonth={t.endpoints.calMonth} v={current} set={setCurrent} />
-              <div className="flex gap-2">
-                <Button size="sm" variant="primary" disabled={busy}
-                  onClick={() => void run("finish", current, true)}>
-                  {t.endpoints.calDerive}
-                </Button>
-              </div>
-            </div>
-          ) : null}
-
-          {/* Cancelling clears the baseline and any derivation - the armed confirm matches Reset
-              data, because the click discards recorded numbers, not a form draft. */}
           {pending ? (
-            <div className="flex flex-wrap items-center gap-2">
-              {cancelArmed ? (
+            <div className="space-y-2 border-t border-[var(--line)] pt-3">
+              {ready ? (
                 <>
-                  <span className="text-2xs text-[var(--warn)]">{t.endpoints.calCancelHint}</span>
-                  <Button size="sm" disabled={busy}
-                    onClick={() => void run("cancel", {}).then(() => setCancelArmed(false))}
-                    className="border-[var(--danger)] text-[var(--danger)] hover:bg-[var(--danger)]/12">
-                    {t.endpoints.calCancelConfirm}
-                  </Button>
-                  <Button size="sm" variant="ghost" disabled={busy}
-                    onClick={() => setCancelArmed(false)}>
-                    {t.common.cancel}
-                  </Button>
+                  <div className="label">{t.endpoints.calStep2}</div>
+                  <PctRow label5h={t.endpoints.cal5h} labelWeek={t.endpoints.calWeek}
+                    labelMonth={t.endpoints.calMonth} v={current} set={setCurrent} />
                 </>
-              ) : (
-                <Button size="sm" variant="ghost" disabled={busy}
-                  onClick={() => setCancelArmed(true)}>
-                  {t.endpoints.calCancel}
-                </Button>
-              )}
+              ) : null}
+              <div className="flex flex-wrap items-center gap-2">
+                {ready ? (
+                  <Button size="sm" variant="primary" disabled={busy}
+                    onClick={() => void run("finish", current, true)}>
+                    {t.endpoints.calDerive}
+                  </Button>
+                ) : null}
+                {cancelArmed ? (
+                  <>
+                    <span className="text-2xs text-[var(--warn)]">{t.endpoints.calCancelHint}</span>
+                    <Button size="sm" disabled={busy}
+                      onClick={() => void run("cancel", {}).then(() => setCancelArmed(false))}
+                      className="border-[var(--danger)] text-[var(--danger)] hover:bg-[var(--danger)]/12">
+                      {t.endpoints.calCancelConfirm}
+                    </Button>
+                    <Button size="sm" variant="ghost" disabled={busy}
+                      onClick={() => setCancelArmed(false)}>
+                      {t.common.cancel}
+                    </Button>
+                  </>
+                ) : (
+                  <Button size="sm" variant="ghost" disabled={busy}
+                    onClick={() => setCancelArmed(true)}>
+                    {t.endpoints.calCancel}
+                  </Button>
+                )}
+              </div>
             </div>
           ) : null}
 
