@@ -144,6 +144,14 @@ reading verifies it: the gap between the prediction and the console is non-route
 coefficient error. Both readings must fall inside one subscription cycle, and the monthly window
 must move at least 0.3 percentage points (below that the console's rounding would swamp the
 derivation, and it is refused).
+
+The progress shown between the two readings ("consumed since the baseline") is read from the
+usage ledger, so a statistics reset cannot distort it; conversely, a reset is refused while a
+calibration is recording, and when it does run it drops an unfinished baseline. A 5-hour or
+weekly window whose readings cross its own reset, or move less than 0.3 points, is skipped
+rather than derived from broken numbers, and the response says so. The end-of-cycle projection
+is only shown when the ledger has observed the cycle from its start - a ledger with half a
+cycle of history cannot extrapolate and reports the measured percentage alone.
 ### Per-token prices, and why there are no "deduction coefficients"
 
 An endpoint may declare what it charges:

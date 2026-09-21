@@ -51,6 +51,8 @@
 | `GET /api/library` · `PUT /api/library` | 模型库 |
 | `GET /api/backups` · `POST /api/backups` | 列出与创建配置备份 |
 | `GET` / `DELETE` `/api/backups/<名>` · `POST .../restore` | 下载、删除、恢复 |
+| `POST /api/stats/reset` | 清零统计、端点健康与计数器（额度账本保留）；校准记录中会被拒绝 |
+| `POST /api/endpoints/<名>/calibrate` | 额度校准：`stage` 为 `start`、`finish`、`verify`、`anchors`、`cancel`；见[配置文档](configuration-zh.md#校准用两次读数推算真实额度) |
 
 设置了 `server.client_keys` 后，除 `/health` 外的所有管理路由都要求与代理相同的 bearer
 token。控制台只在回环地址默认未鉴权——这也是应该保持默认的原因。

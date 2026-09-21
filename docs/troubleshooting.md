@@ -64,16 +64,23 @@ as `unknown top-level section` and otherwise ignored.
 
 ## The dashboard numbers look wrong
 
-- `savings.opencodego_saved_usd` is what the traffic routed through prepaid endpoints *would*
-  have cost in cash at that moment's peak/off-peak rate - an estimate, not an invoice.
-- `fallback_spent_usd` is what was actually charged to cash accounts.
+- `saved` in a plan endpoint's statistics is what the traffic routed through it *would* have
+  cost in cash at that moment's peak/off-peak rate - an estimate, not an invoice, kept in the
+  endpoint's own currency and never summed across currencies.
 - `cold_starts` counts successful requests whose prompt was not served from upstream cache,
   which is the number to watch when a session is hopping between endpoints.
+- The "in flight" mark on an endpoint row means that endpoint **has a request on the upstream
+  right now** (the whole stream included); it is a state, not a completion count. The mark is
+  stamped and aged, so debris left by an abnormally torn-down connection reads as idle again
+  after an hour instead of painting an idle endpoint busy forever.
 - These counters are a **lifetime** total, not a per-process one: they are written to the state
   file, so restarting the router does not reset them. **Reset data** on the Overview page is what
   zeroes them - it clears the counters, the per-endpoint statistics and the endpoint failure
   memory, and writes the state file immediately. The local quota ledger survives a reset on
   purpose: it feeds routing, and clearing it would make a plan look unused and get used first.
+  A reset is refused while a calibration is recording (the console says to cancel it first),
+  and it also drops an unfinished calibration baseline, since the counters that baseline
+  references were just zeroed.
 - If a counter never moves at all, check that the tab is not suspended in the background and
   that the endpoint actually served the request (`x-router-account` in the response).
 

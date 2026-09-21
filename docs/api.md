@@ -52,6 +52,8 @@ Every proxied response carries:
 | `GET /api/library` · `PUT /api/library` | Model library |
 | `GET /api/backups` · `POST /api/backups` | List and create config backups |
 | `GET` / `DELETE` `/api/backups/<name>` · `POST .../restore` | Download, delete, restore |
+| `POST /api/stats/reset` | Zero the statistics, endpoint health and counters (the quota ledger is kept); refused while a calibration is recording |
+| `POST /api/endpoints/<name>/calibrate` | Quota calibration: `stage` is `start`, `finish`, `verify`, `anchors` or `cancel`; see the [configuration docs](configuration.md#calibration-deriving-the-real-allowance-from-two-readings) |
 
 When `server.client_keys` is set, every admin route except `/health` requires the same bearer
 token as the proxy. The console remains unauthenticated only on the loopback default, which is
