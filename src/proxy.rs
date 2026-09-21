@@ -318,10 +318,11 @@ fn stats_json(state: &Arc<AppState>) -> Value {
             // pool. Without this the dashboard could only guess from the available flag, which is
             // about cooldowns and quota, not about the enable switch.
             obj.insert("enabled".to_string(), json!(acc.cfg.is_enabled()));
-            obj.insert(
-                "in_flight".to_string(),
-                json!(acc.rt.in_flight.load(Ordering::Relaxed)),
-            );
+            // The reported count is the aged one; the raw counter travels alongside it so a leak is
+            // visible in the API instead of having to be inferred from a number that never drops.
+            // They differ only when a mark outlived the age limit, which is a bug worth seeing.
+            obj.insert("in_flight".to_string(), json!(acc.rt.in_flight()));
+            obj.insert("in_flight_raw".to_string(), json!(acc.rt.in_flight_raw()));
         }
         acc_json.push(v);
     }
@@ -816,8 +817,10 @@ fn proxy(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
         }
 
         // From here to the end of the attempt the endpoint is in use - including the whole stream,
-        // which is exactly the window the completion-time statistics cannot see.
-        let _in_flight = acc.rt.in_flight_guard();
+        // which is exactly the window the completion-time statistics cannot see. The guard is the
+        // RAII mark; the explicit clear below covers the paths where an unwinding write error would
+        // otherwise leave it set (see the note on InFlightGuard::disarm).
+        let mut in_flight = acc.rt.in_flight_guard();
         let started = Instant::now();
         log_info!(
             "[{}] -> {} {} model={} stream={} ({})",
@@ -856,6 +859,7 @@ fn proxy(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
                     AccountKind::Plans => state.statics.plans_used.fetch_add(1, Ordering::Relaxed),
                     AccountKind::Cash => state.statics.cash_used.fetch_add(1, Ordering::Relaxed),
                 };
+                in_flight.clear();
                 return;
             }
             Ok(resp) => {

@@ -136,6 +136,14 @@ pub struct LocalLedger {
 /// samples cover any realistic request rate while keeping the file small.
 const PERSISTED_SAMPLES: usize = 2000;
 
+/// How long an in-flight mark may stay set before it is treated as debris rather than traffic.
+///
+/// The longest legitimate hold is one upstream stream. `attempt_budget_secs` bounds a whole retry
+/// chain but not an individual stream, so this is deliberately generous: an hour is far beyond any
+/// productive generation and still short enough that a leaked mark clears itself within a session
+/// rather than painting an idle endpoint busy until the next restart.
+const IN_FLIGHT_MAX_HOLD_SECS: i64 = 3600;
+
 impl LocalLedger {
     /// Totals plus a bounded tail of samples, for the state file.
     ///
@@ -819,7 +827,9 @@ pub struct AccountRuntime {
     /// completion-time statistics for its whole duration, which reads as "this endpoint has been
     /// idle for minutes" while it is in fact mid-generation.
     pub in_flight: AtomicI64,
-
+    /// When the newest in-flight mark was taken (`in_flight` counter), so a leaked mark can be
+    /// aged out instead of misread as a live request.
+    pub in_flight_since: AtomicI64,
 }
 
 impl AccountRuntime {
@@ -833,7 +843,7 @@ impl AccountRuntime {
             cooldown_until: AtomicI64::new(0),
             cooldown_reason: Mutex::new(None),
             in_flight: AtomicI64::new(0),
-
+            in_flight_since: AtomicI64::new(0),
         }
     }
 
@@ -913,10 +923,35 @@ impl AccountRuntime {
     /// idle while it is mid-generation.
     pub fn in_flight_guard(&self) -> crate::state::InFlightGuard<'_> {
         self.in_flight.fetch_add(1, Ordering::Relaxed);
-        crate::state::InFlightGuard { rt: self }
+        // Stamp the mark so a reader can tell "a request started long ago and its guard never
+        // dropped" apart from "a request is running right now". Without this the two are the same
+        // number and the stale one is indistinguishable from live traffic.
+        self.in_flight_since
+            .store(crate::util::now_secs(), Ordering::Relaxed);
+        crate::state::InFlightGuard { rt: self, armed: true }
     }
 
+    /// In-flight requests right now.
+    ///
+    /// The mark is a counter, not a set, so it cannot list which requests are running. It is also
+    /// only as good as its guards: a connection thread killed mid-write, or any exit path that
+    /// bypasses the guard destructor, leaves the counter high for good. An aged mark is therefore
+    /// treated as debris and reported as zero rather than as traffic - a stale count is worse than
+    /// no count, because it makes an idle endpoint look busy forever.
     pub fn in_flight(&self) -> i64 {
+        let n = self.in_flight.load(Ordering::Relaxed);
+        if n <= 0 {
+            return 0;
+        }
+        let since = self.in_flight_since.load(Ordering::Relaxed);
+        if since > 0 && crate::util::now_secs() - since > IN_FLIGHT_MAX_HOLD_SECS {
+            return 0;
+        }
+        n
+    }
+
+    /// The raw counter, debris included. Diagnostics only.
+    pub fn in_flight_raw(&self) -> i64 {
         self.in_flight.load(Ordering::Relaxed)
     }
 
@@ -1259,13 +1294,31 @@ pub fn stats_snapshot(state: &crate::proxy::AppState) -> HashMap<String, Account
 }
 
 /// Clears one in-flight mark on drop. Held for the whole upstream request, stream included.
+///
+/// The destructor is the normal path and covers success, upstream error and early return alike.
+/// What it cannot cover is a thread that never unwinds normally - a connection thread torn down
+/// mid-write can leave the mark behind. `AccountRuntime::in_flight` ages such debris out; the
+/// explicit `clear` here is the belt to that pair of braces, so an ordinary early return drops the
+/// count immediately instead of waiting for the age limit.
 pub struct InFlightGuard<'a> {
     rt: &'a AccountRuntime,
+    armed: bool,
+}
+
+impl InFlightGuard<'_> {
+    /// Release the mark now. Idempotent: a second call is a no-op, so a caller may clear on the
+    /// way out and still let the destructor run.
+    pub fn clear(&mut self) {
+        if self.armed {
+            self.armed = false;
+            self.rt.in_flight.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 impl Drop for InFlightGuard<'_> {
     fn drop(&mut self) {
-        self.rt.in_flight.fetch_sub(1, Ordering::Relaxed);
+        self.clear();
     }
 }
 

@@ -87,6 +87,8 @@ export type Account = {
   /** Requests dispatched upstream but not finished. A long stream sits here for its whole
    *  duration, invisible to the completion-time counters. */
   in_flight?: number;
+  /** The counter before ageing, for diagnostics: differs from in_flight only when a mark leaked. */
+  in_flight_raw?: number;
   managed?: boolean;
   extra_headers?: Record<string, string>;
   drop_params?: string[];

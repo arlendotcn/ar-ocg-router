@@ -857,3 +857,70 @@ fn a_remote_probe_keeps_its_own_unit() {
     assert_eq!(q.to_json(1_000_000, &report, "USD", &crate::state::AccountStats::default())["unit"], "tokens");
 }
 
+
+// ------------------------------------------------------------- in-flight marks
+
+#[test]
+fn an_in_flight_mark_clears_once_and_only_once() {
+    let rt = crate::state::AccountRuntime::new("t");
+    assert_eq!(rt.in_flight(), 0);
+    {
+        let mut g = rt.in_flight_guard();
+        assert_eq!(rt.in_flight(), 1);
+        g.clear();
+        // Idempotent: the explicit clear plus the destructor must not subtract twice. A double
+        // decrement would report a negative count, and a negative count clamps to "idle" while
+        // another request is genuinely running.
+        assert_eq!(rt.in_flight(), 0);
+        g.clear();
+        assert_eq!(rt.in_flight(), 0);
+    }
+    assert_eq!(rt.in_flight(), 0);
+    assert_eq!(rt.in_flight_raw(), 0);
+}
+
+#[test]
+fn nested_marks_add_up_and_unwind_in_order() {
+    let rt = crate::state::AccountRuntime::new("t");
+    let a = rt.in_flight_guard();
+    let b = rt.in_flight_guard();
+    assert_eq!(rt.in_flight(), 2);
+    drop(b);
+    assert_eq!(rt.in_flight(), 1);
+    drop(a);
+    assert_eq!(rt.in_flight(), 0);
+}
+
+#[test]
+fn a_leaked_mark_ages_out_instead_of_reading_as_traffic() {
+    let rt = crate::state::AccountRuntime::new("t");
+    // Simulate the debris a torn-down connection thread leaves behind: the counter is up but the
+    // stamp is old, which is exactly what `in_flight_guard` records.
+    rt.in_flight.fetch_add(3, std::sync::atomic::Ordering::Relaxed);
+    rt.in_flight_since.store(
+        crate::util::now_secs() - 2 * 3600,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    assert_eq!(rt.in_flight(), 0, "an aged mark is not traffic");
+    assert_eq!(rt.in_flight_raw(), 3, "the debris stays visible for diagnostics");
+
+    // A fresh mark is traffic again, no matter how much debris preceded it.
+    let _g = rt.in_flight_guard();
+    assert_eq!(rt.in_flight(), 4);
+    drop(_g);
+    assert_eq!(rt.in_flight(), 3);
+}
+
+#[test]
+fn a_negative_counter_reads_as_idle_not_as_traffic() {
+    let rt = crate::state::AccountRuntime::new("t");
+    rt.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(rt.in_flight(), 0);
+}
+
+#[test]
+fn account_stats_serialise_in_flight_with_its_diagnostic_floor() {
+    let rt = crate::state::AccountRuntime::new("t");
+    assert_eq!(rt.in_flight(), 0);
+    assert_eq!(rt.in_flight_raw(), 0);
+}
