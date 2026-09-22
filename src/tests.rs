@@ -1414,3 +1414,38 @@ fn merging_allowances_adds_the_shares_and_never_double_counts() {
     solo.add_usage(5, Usage { prompt: 10, cached: 0, completion: 0 });
     assert_eq!(LocalLedger::merge(vec![solo]).total_tokens, 10);
 }
+
+/// `local_ledger.monthly` must be cycle-aligned, like the percentage above it. With a trailing
+/// 30-day sum the two disagreed at exactly the wrong moment: on the day the provider resets, the
+/// percentage reads 0% while the amount still holds the whole of last cycle.
+#[test]
+fn the_local_ledger_month_is_cycle_aligned() {
+    use crate::config::{QuotaCfg, QuotaUnit};
+    use crate::state::{LocalLedger, QuotaState, Usage};
+
+    let at = |s: &str| timeutil::parse_iso8601(s).unwrap();
+    let cfg = QuotaCfg { unit: QuotaUnit::Rmb, monthly: 200.0, cycle_day: 26, ..QuotaCfg::default() };
+
+    let mut q = QuotaState::default();
+    q.ledger = LocalLedger::default();
+    // 50 spent in the cycle that ended 2026-09-26, 20 in the current one.
+    q.ledger.add_usage(at("2026-09-20T00:00:00Z"), Usage { prompt: 50_000_000, cached: 0, completion: 0 });
+    q.ledger.add_usage(at("2026-09-27T00:00:00Z"), Usage { prompt: 20_000_000, cached: 0, completion: 0 });
+
+    let now = at("2026-09-28T00:00:00Z");
+    let report = q.report(now, 3_600, 80.0, true, 99.0, &cfg, &PRICES, false);
+    let v = q.to_json(now, &report, "RMB", &crate::state::AccountStats::default(), &PRICES, false);
+
+    assert_eq!(report.cycle_start, Some(at("2026-09-26T00:00:00Z")));
+    assert_eq!(v["local_ledger"]["monthly"], 20.0, "only the current cycle counts");
+    assert_eq!(v["monthly"]["used"], 20.0, "the percentage agrees with the amount");
+    // The lifetime total is untouched by the cycle, so nothing is actually forgotten.
+    assert_eq!(v["local_ledger"]["total"], 70.0);
+
+    // A plan without a cycle keeps the trailing 30-day window it always had.
+    let sliding = QuotaCfg { cycle_day: 0, ..cfg };
+    let report = q.report(now, 3_600, 80.0, true, 99.0, &sliding, &PRICES, false);
+    assert_eq!(report.cycle_start, None);
+    let v = q.to_json(now, &report, "RMB", &crate::state::AccountStats::default(), &PRICES, false);
+    assert_eq!(v["local_ledger"]["monthly"], 70.0, "a sliding window still reaches back 30 days");
+}

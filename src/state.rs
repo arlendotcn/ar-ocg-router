@@ -655,6 +655,10 @@ pub struct QuotaReport {
     pub rolling: QuotaView,
     pub weekly: QuotaView,
     pub monthly: QuotaView,
+    /// The start of the current billing cycle, when the plan has one. Carried on the report because
+    /// the ledger views are cycle-aligned: a consumer computing an amount from the ledger needs the
+    /// same window boundary the percentage above it used, and the boundary is knowable only here.
+    pub cycle_start: Option<i64>,
 }
 
 /// The active billing cycle (start, next start) when the plan has one, else None.
@@ -873,6 +877,7 @@ impl QuotaState {
             rolling,
             weekly,
             monthly,
+            cycle_start: cycle.map(|(s, _)| s),
         }
     }
 
@@ -971,11 +976,21 @@ impl QuotaState {
             "weekly": weekly_view,
             "monthly": w(&report.monthly),
             // The suffix is gone: the unit is the endpoint's currency, not necessarily dollars.
+            //
+            // `monthly` is cycle-aligned when the plan has a cycle, matching the percentage above
+            // it. A trailing 30-day sum would still hold the previous cycle on the day the provider
+            // resets, so the amount and the percentage would disagree at exactly the moment the
+            // operator looks: the percentage would read 0% beside the whole of last month's spend.
             "local_ledger": {
                 "total": (self.ledger.cost_since(0, prices, peak) * 1e6).round() / 1e6,
                 "rolling": (self.ledger.window_cost(now, PERIOD_ROLLING, prices, peak) * 1e6).round() / 1e6,
                 "weekly": (self.ledger.window_cost(now, PERIOD_WEEKLY, prices, peak) * 1e6).round() / 1e6,
-                "monthly": (self.ledger.window_cost(now, PERIOD_MONTHLY, prices, peak) * 1e6).round() / 1e6,
+                "monthly": (self
+                    .ledger
+                    .cost_since(report.cycle_start.unwrap_or(now - PERIOD_MONTHLY), prices, peak)
+                    * 1e6)
+                    .round()
+                    / 1e6,
             },
             "calibration": {
                 "anchors": self.anchors.to_json(),
@@ -1232,6 +1247,7 @@ impl AccountRuntime {
                 rolling: blank,
                 weekly: blank,
                 monthly: blank,
+                cycle_start: cycle_window(now, quota).map(|(s, _)| s),
             },
         }
     }

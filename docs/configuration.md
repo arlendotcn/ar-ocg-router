@@ -103,6 +103,27 @@ When no probe is available the router falls back to a local ledger (accumulated 
 as a share of the plan limit). That only affects the precision of the off-peak
 "is this quota going to waste" test, never availability.
 
+The ledger stores **token counts, never money**. Money is a function of the rates in force at the
+moment of reading, so folding rates into the samples would freeze whatever price was configured
+when each request happened: correcting a price could then never fix the history that price
+produced. Keeping the counts means corrected rates apply everywhere at once, backwards included,
+and two models billed differently can be added up by pricing each with its own rates.
+
+### Endpoints that share a plan
+
+Two endpoints configured with the same provider **and the same key** are two models on one plan,
+so they consume one allowance. They share the quota state - readings, calibration, and the token
+ledger - while keeping their own statistics, cooldowns and in-flight marks, because those describe
+the endpoint rather than the plan. Rates stay per endpoint: the provider charges each model
+differently, and the ledger prices each model's tokens with its own.
+
+This means a plan is **calibrated once** for all of its models, and the console reports the same
+allowed percentage for each of them rather than showing the same consumption under two names.
+
+The key is part of the identity on purpose: the same provider reached with two different keys is
+two plans, and merging them would invent an allowance that neither key has. An endpoint with no key
+has nothing to group on and keeps its own allowance.
+
 ### Subscription cycles, and why a reset day is needed
 
 A pay-as-you-go account has no cycle: what it spends keeps accumulating. A subscription is
@@ -123,6 +144,12 @@ With `cycle_day` set, "used this cycle" means everything accumulated since the c
 boundary is derived from the anchor day, so the reset instant is **knowable locally** - something a
 sliding window never provided. That is why the console can now show a reset countdown and a
 projection that agree with the provider's own screen.
+
+The ledger views report that same window: the amount beside a percentage is computed from the cycle
+start rather than from a trailing 30 days. A trailing sum would still hold the previous cycle on
+the day the provider resets, so the amount and the percentage would disagree at exactly the moment
+an operator looks - a 0% window beside the whole of last cycle's spend. The lifetime total is
+unaffected by the cycle, so nothing is forgotten.
 
 ### Calibration: deriving the real allowance from two readings
 

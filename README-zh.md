@@ -66,5 +66,5 @@ DeepSeek 官方与其转售方（OpenCode Go 及同类预付编程套餐）对�
 
 ## 状态
 
-版本 0.0.3。[上游事实](docs/upstream-zh.md) 中的厂商行为基于 2026-09-17 的线上实测；
+版本 0.0.4。[上游事实](docs/upstream-zh.md) 中的厂商行为基于 2026-09-17 的线上实测；
 运行限制见 [故障排查](docs/troubleshooting-zh.md)。

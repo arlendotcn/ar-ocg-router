@@ -1,6 +1,6 @@
 [package]
 name = "ar-ocg-router"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2021"
 rust-version = "1.75"
 description = "ar-OCG-Router - multi-account router for OpenCode Go + DeepSeek official API (peak/off-peak aware)"
