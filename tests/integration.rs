@@ -2203,19 +2203,26 @@ fn statistics_survive_a_restart_until_they_are_reset() {
     //
     // It stores token counts, not money: the rates that turn them into money are configuration, and
     // correcting a rate has to correct the history it priced.
+    // Keyed by allowance, not by endpoint name: endpoints sharing a provider credential are two
+    // models on one plan and share one record. This endpoint is alone in its plan, so the key is
+    // still derived from the credential it authenticates with.
+    let ledgers = doc["ledgers"].as_object().expect("ledgers object");
+    assert_eq!(ledgers.len(), 1, "one allowance is recorded: {}", text);
+    let (key, ledger) = ledgers.iter().next().unwrap();
+    assert!(key.contains("sk-go-test"), "keyed by credential, got {key}");
     assert!(
-        doc["ledgers"]["go-1"]["total_tokens"].as_u64().unwrap_or(0) > 0,
+        ledger["total_tokens"].as_u64().unwrap_or(0) > 0,
         "the usage ledger is missing from the state file: {}",
         text
     );
-    let sample = &doc["ledgers"]["go-1"]["samples"][0];
+    let sample = &ledger["samples"][0];
     assert!(
         sample.as_array().is_some_and(|a| a.len() == 4),
         "a sample is [ts, prompt, cached, completion]: {}",
         sample
     );
     assert!(
-        doc["ledgers"]["go-1"].get("total_cost").is_none(),
+        ledger.get("total_cost").is_none(),
         "money must not be stored in the ledger: {}",
         text
     );

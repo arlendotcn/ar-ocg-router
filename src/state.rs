@@ -378,6 +378,31 @@ impl LocalLedger {
         self.cost_since(from, prices, peak) - self.cost_since(to, prices, peak)
     }
 
+    /// Combine several ledgers into one, in time order.
+    ///
+    /// Used when endpoints that used to keep separate records turn out to share an allowance: each
+    /// record holds a different model's share of the same plan, so the shares add up. Samples that
+    /// are identical in every field are kept once - a partially migrated file can hold the same
+    /// request under both its endpoint name and its group, and counting it twice would inflate the
+    /// plan by real, spendable money.
+    pub fn merge(parts: Vec<LocalLedger>) -> LocalLedger {
+        let mut all: Vec<LedgerSample> = Vec::new();
+        for p in parts {
+            all.extend(p.samples.into_iter());
+        }
+        all.sort_by_key(|s| s.ts);
+        all.dedup_by(|a, b| {
+            a.ts == b.ts && a.prompt == b.prompt && a.cached == b.cached && a.completion == b.completion
+        });
+        let total_tokens = all.iter().map(|s| s.total_tokens()).sum();
+        let mut out = LocalLedger { samples: VecDeque::from(all), total_tokens };
+        // The merged history can exceed the persistence cap; the same rule as `add_usage` applies.
+        while out.samples.len() > PERSISTED_SAMPLES {
+            out.samples.pop_front();
+        }
+        out
+    }
+
     pub fn window_tokens(&self, now: i64, period_secs: i64) -> u64 {
         let from = now - period_secs;
         self.samples
@@ -998,7 +1023,17 @@ pub struct BalanceInfo {
 pub struct AccountRuntime {
     pub name: String,
     pub stats: Mutex<AccountStats>,
-    pub quota: Mutex<QuotaState>,
+    /// The allowance this endpoint draws on.
+    ///
+    /// Shared, not owned: endpoints configured against the same provider credential are two models
+    /// on one plan, so they consume one allowance. Per-endpoint state made the router see two
+    /// half-used budgets - failing to notice a plan run dry, and reporting the same consumption
+    /// twice. The rates that price each model's tokens stay per endpoint, because the provider
+    /// charges them differently; only the money they add up to is shared.
+    pub quota: Arc<Mutex<QuotaState>>,
+    /// The allowance group this endpoint belongs to (empty = its own). Quota state is keyed by
+    /// group when persisted, so a restart reconstructs the same sharing.
+    pub group: String,
     pub balance: Mutex<Option<BalanceInfo>>,
     pub models: Mutex<Option<(i64, Vec<String>)>>,
     pub cooldown_until: AtomicI64,
@@ -1014,10 +1049,18 @@ pub struct AccountRuntime {
 
 impl AccountRuntime {
     pub fn new(name: &str) -> AccountRuntime {
+        AccountRuntime::with_quota(name, String::new(), Arc::new(Mutex::new(QuotaState::default())))
+    }
+
+    /// Build a runtime bound to an existing allowance cell. Two endpoints given the same cell share
+    /// everything the cell holds (readings, calibration, the token ledger) while keeping their own
+    /// statistics, cooldowns and in-flight marks.
+    pub fn with_quota(name: &str, group: String, quota: Arc<Mutex<QuotaState>>) -> AccountRuntime {
         AccountRuntime {
             name: name.to_string(),
             stats: Mutex::new(AccountStats::default()),
-            quota: Mutex::new(QuotaState::default()),
+            quota,
+            group,
             balance: Mutex::new(None),
             models: Mutex::new(None),
             cooldown_until: AtomicI64::new(0),
@@ -1317,11 +1360,64 @@ impl UsageDelta {
 #[derive(Debug, Default)]
 pub struct Registry {
     map: Mutex<HashMap<String, Arc<AccountRuntime>>>,
+    /// Allowance groups: group id -> the shared quota cell. See `get_or_create_in_group`.
+    groups: Mutex<HashMap<String, Arc<Mutex<QuotaState>>>>,
 }
 
 impl Registry {
     pub fn new() -> Registry {
-        Registry { map: Mutex::new(HashMap::new()) }
+        Registry { map: Mutex::new(HashMap::new()), groups: Mutex::new(HashMap::new()) }
+    }
+
+    /// Create (or fetch) an endpoint runtime, sharing an allowance with any endpoint already in
+    /// `group`.
+    ///
+    /// `group` identifies the allowance, not the endpoint: endpoints that share a provider
+    /// credential are two models on one plan and must consume one budget. The first member creates
+    /// the cell; later members are handed it. An empty `group` leaves the endpoint on its own
+    /// allowance, which is how every endpoint behaved before this existed.
+    pub fn get_or_create_in_group(&self, name: &str, group: &str) -> Arc<AccountRuntime> {
+        let mut m = match self.map.lock() {
+            Ok(m) => m,
+            Err(p) => p.into_inner(),
+        };
+        if let Some(existing) = m.get(name) {
+            return existing.clone();
+        }
+        let cell = if group.is_empty() {
+            Arc::new(Mutex::new(QuotaState::default()))
+        } else {
+            let mut g = match self.groups.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            g.entry(group.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(QuotaState::default())))
+                .clone()
+        };
+        let rt = Arc::new(AccountRuntime::with_quota(name, group.to_string(), cell));
+        m.insert(name.to_string(), rt.clone());
+        rt
+    }
+
+    /// The key under which this endpoint's allowance is persisted: the group id when it shares
+    /// one, its own name otherwise. Two endpoints on one plan therefore store and load one record,
+    /// which is what keeps the sharing correct across a restart.
+    pub fn quota_key(rt: &AccountRuntime) -> String {
+        if rt.group.is_empty() {
+            rt.name.clone()
+        } else {
+            rt.group.clone()
+        }
+    }
+
+    /// The shared cell a group uses, if the group exists.
+    pub fn group_quota(&self, group: &str) -> Option<Arc<Mutex<QuotaState>>> {
+        let g = match self.groups.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        g.get(group).cloned()
     }
 
     pub fn get_or_create(&self, name: &str) -> Arc<AccountRuntime> {
@@ -1382,17 +1478,41 @@ impl Registry {
             Ok(m) => m,
             Err(p) => p.into_inner(),
         };
+        // Gather what belongs to each allowance. A file written before grouping lists one record per
+        // endpoint, and each holds only that model's share of the plan; the shares must be merged
+        // rather than one of them winning, or grouping would discard real consumption. Records are
+        // merged by timestamp so a sample is never counted twice.
+        let mut by_cell: HashMap<usize, (Arc<Mutex<QuotaState>>, Vec<LocalLedger>)> = HashMap::new();
+        for rt in m.values() {
+            let key = Registry::quota_key(rt);
+            let mut parts: Vec<LocalLedger> = Vec::new();
+            if let Some(l) = ledgers.get(&key) {
+                parts.push(l.clone());
+            }
+            // Also pick up any per-endpoint record under this endpoint's own name: an old file has
+            // no group record at all, and a partially migrated one may have both.
+            if rt.name != key {
+                if let Some(l) = ledgers.get(&rt.name) {
+                    parts.push(l.clone());
+                }
+            }
+            if parts.is_empty() {
+                continue;
+            }
+            let id = Arc::as_ptr(&rt.quota) as usize;
+            by_cell.entry(id).or_insert_with(|| (rt.quota.clone(), Vec::new())).1.extend(parts);
+        }
         let mut restored = 0usize;
-        for (name, l) in ledgers {
-            let Some(rt) = m.get(name) else { continue };
-            let mut q = match rt.quota.lock() {
+        for (_, (cell, parts)) in by_cell {
+            let merged = LocalLedger::merge(parts);
+            let mut q = match cell.lock() {
                 Ok(q) => q,
                 Err(p) => p.into_inner(),
             };
-            q.ledger = l.clone();
+            q.ledger = merged;
             restored += 1;
         }
-        crate::log_info!("restored usage ledgers for {} endpoint(s)", restored);
+        crate::log_info!("restored usage ledgers for {} allowance(s)", restored);
     }
 
     /// Re-attach calibration flows at startup: a pending first reading, or a completed derivation.
@@ -1404,9 +1524,17 @@ impl Registry {
             Ok(m) => m,
             Err(p) => p.into_inner(),
         };
+        // Same keying as the ledger: one calibration per allowance, shared by its models.
+        let mut done: Vec<usize> = Vec::new();
         let mut restored = 0usize;
-        for (name, entry) in map {
-            let Some(rt) = m.get(name) else { continue };
+        for rt in m.values() {
+            let key = Registry::quota_key(rt);
+            let Some(entry) = map.get(&key).or_else(|| map.get(&rt.name)) else { continue };
+            let id = Arc::as_ptr(&rt.quota) as usize;
+            if done.contains(&id) {
+                continue;
+            }
+            done.push(id);
             let mut q = match rt.quota.lock() {
                 Ok(q) => q,
                 Err(p) => p.into_inner(),
@@ -1416,7 +1544,7 @@ impl Registry {
             q.anchors = entry.anchors.clone();
             restored += 1;
         }
-        crate::log_info!("restored calibration state for {} endpoint(s)", restored);
+        crate::log_info!("restored calibration state for {} allowance(s)", restored);
     }
 
     /// Zero every per-endpoint counter. The local ledger and the cooldown clocks are left alone:
@@ -1441,7 +1569,10 @@ impl Registry {
     }
 }
 
-/// Every endpoint's sliding-window ledger, keyed by name.
+/// Every allowance's sliding-window ledger, keyed by allowance (see `Registry::quota_key`).
+///
+/// A plan shared by several models writes one record: the map is keyed by group, so the second
+/// model's write lands on the same key with the same value rather than duplicating the history.
 pub fn ledger_snapshot(state: &crate::proxy::AppState) -> HashMap<String, LocalLedger> {
     let mut out = HashMap::new();
     for rt in state.registry.all() {
@@ -1450,14 +1581,15 @@ pub fn ledger_snapshot(state: &crate::proxy::AppState) -> HashMap<String, LocalL
             Err(p) => p.into_inner().ledger.clone(),
         };
         if l.total_tokens != 0 || !l.samples.is_empty() {
-            out.insert(rt.name.clone(), l);
+            out.insert(Registry::quota_key(&rt), l);
         }
     }
     out
 }
 
-/// The calibration flow per endpoint: a pending first reading and/or a completed derivation.
+/// The calibration flow per allowance: a pending first reading and/or a completed derivation.
 /// Both survive restarts - the wizard spans a consumption window that can outlive the process.
+/// A plan is calibrated once, so the entry is keyed by allowance and shared by its models.
 pub fn calibration_snapshot(state: &crate::proxy::AppState) -> HashMap<String, CalibrationEntry> {
     let mut out = HashMap::new();
     for rt in state.registry.all() {
@@ -1467,7 +1599,7 @@ pub fn calibration_snapshot(state: &crate::proxy::AppState) -> HashMap<String, C
         };
         if q.reading.is_some() || q.calibration.is_some() || q.anchors.bucket_5h > 0 || q.anchors.week_reset > 0 {
             out.insert(
-                rt.name.clone(),
+                Registry::quota_key(&rt),
                 CalibrationEntry {
                     reading: q.reading.clone(),
                     derived: q.calibration.clone(),

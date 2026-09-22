@@ -102,13 +102,27 @@ impl AppState {
     }
 }
 
+/// The allowance an endpoint draws on: the provider plus the credential it authenticates with.
+///
+/// Two endpoints with the same pair are two models on one plan. The key is part of the identity on
+/// purpose: the same provider reached with two different credentials is two plans, and merging them
+/// would invent an allowance that neither credential has.
+fn allowance_group(a: &crate::config::AccountCfg) -> String {
+    if a.key.trim().is_empty() {
+        // No credential to group on (an upstream that needs none): nothing says the endpoints share
+        // anything, so each keeps its own allowance rather than all of them merging into one.
+        return String::new();
+    }
+    format!("{}|{}", a.provider.as_str(), a.key.trim())
+}
+
 pub fn build_accounts(cfg: &Config, registry: &Arc<Registry>) -> Vec<Arc<Account>> {
     cfg.accounts
         .iter()
         .map(|a| {
             Arc::new(Account {
                 cfg: a.clone(),
-                rt: registry.get_or_create(&a.name),
+                rt: registry.get_or_create_in_group(&a.name, &allowance_group(a)),
             })
         })
         .collect()

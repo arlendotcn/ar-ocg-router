@@ -1324,3 +1324,93 @@ fn older_samples_keep_their_token_total_when_the_split_is_absent() {
     // Both samples price out, so the money is recoverable from the counts alone.
     assert!(l.cost_since(0, &PRICES, false) > 0.0);
 }
+
+// ---------------------------------------------------------------- allowance groups
+
+/// Two endpoints with the same provider credential are two models on one plan: they must share one
+/// allowance. Giving each its own made the router see two half-used budgets (so it did not notice
+/// the plan running dry) and made the console report the same consumption twice.
+#[test]
+fn endpoints_with_one_credential_share_one_allowance() {
+    use crate::state::{Registry, Usage};
+
+    let reg = Registry::new();
+    let a = reg.get_or_create_in_group("vol-glm", "generic|KEY");
+    let b = reg.get_or_create_in_group("vol-dsf", "generic|KEY");
+    // Different endpoints...
+    assert_ne!(a.name, b.name);
+    // ...but one allowance: spending through either shows up for both.
+    a.quota.lock().unwrap().ledger.add_usage(1_000, Usage { prompt: 2_000_000, cached: 0, completion: 0 });
+    b.quota.lock().unwrap().ledger.add_usage(1_001, Usage { prompt: 3_000_000, cached: 0, completion: 0 });
+    assert_eq!(
+        a.quota.lock().unwrap().ledger.total_tokens,
+        5_000_000,
+        "both models draw on the same plan"
+    );
+    assert_eq!(b.quota.lock().unwrap().ledger.total_tokens, 5_000_000);
+
+    // Everything that describes the endpoint stays its own.
+    a.stats.lock().unwrap().requests = 7;
+    assert_eq!(b.stats.lock().unwrap().requests, 0, "statistics are per endpoint");
+}
+
+/// A different credential is a different plan, and an endpoint with no credential has nothing to
+/// group on. Merging either case would invent an allowance that does not exist.
+#[test]
+fn different_credentials_keep_separate_allowances() {
+    use crate::state::{Registry, Usage};
+
+    let reg = Registry::new();
+    let a = reg.get_or_create_in_group("one", "generic|KEY-A");
+    let b = reg.get_or_create_in_group("two", "generic|KEY-B");
+    let c = reg.get_or_create_in_group("three", "");
+    a.quota.lock().unwrap().ledger.add_usage(1_000, Usage { prompt: 1_000_000, cached: 0, completion: 0 });
+    assert_eq!(b.quota.lock().unwrap().ledger.total_tokens, 0, "a different key is a different plan");
+    assert_eq!(c.quota.lock().unwrap().ledger.total_tokens, 0, "an ungrouped endpoint is its own");
+}
+
+/// The allowance is what gets persisted, so a restart reconstructs the sharing rather than one
+/// record per model.
+#[test]
+fn a_grouped_allowance_persists_under_one_key() {
+    use crate::state::Registry;
+
+    let reg = Registry::new();
+    let a = reg.get_or_create_in_group("vol-glm", "generic|KEY");
+    let b = reg.get_or_create_in_group("vol-dsf", "generic|KEY");
+    assert_eq!(Registry::quota_key(&a), "generic|KEY");
+    assert_eq!(Registry::quota_key(&b), "generic|KEY", "one record for the plan");
+
+    // An endpoint on its own allowance keeps its name as the key, which is how every existing
+    // state file is already laid out.
+    let solo = reg.get_or_create_in_group("go-dsf", "");
+    assert_eq!(Registry::quota_key(&solo), "go-dsf");
+}
+
+/// When endpoints that kept separate records turn out to share an allowance, their shares merge.
+/// Each holds a different model's consumption of the same plan, so losing one loses real money.
+/// An identical sample appearing twice - a partially migrated file - is counted once.
+#[test]
+fn merging_allowances_adds_the_shares_and_never_double_counts() {
+    use crate::state::{LocalLedger, Usage};
+
+    let mut glm = LocalLedger::default();
+    glm.add_usage(1_000, Usage { prompt: 1_000_000, cached: 0, completion: 0 });
+    glm.add_usage(1_002, Usage { prompt: 2_000_000, cached: 0, completion: 0 });
+
+    let mut dsf = LocalLedger::default();
+    dsf.add_usage(1_001, Usage { prompt: 3_000_000, cached: 0, completion: 0 });
+    // The same request also present under the group, as a half-migrated file would have it.
+    dsf.add_usage(1_002, Usage { prompt: 2_000_000, cached: 0, completion: 0 });
+
+    let merged = LocalLedger::merge(vec![glm, dsf]);
+    assert_eq!(merged.samples.len(), 3, "the duplicate is kept once");
+    assert_eq!(merged.total_tokens, 6_000_000, "1M + 2M + 3M, not 8M");
+    let stamps: Vec<i64> = merged.samples.iter().map(|s| s.ts).collect();
+    assert_eq!(stamps, vec![1_000, 1_001, 1_002], "merged in time order");
+
+    // A single ledger merges to itself, which is what a file with no grouping already looks like.
+    let mut solo = LocalLedger::default();
+    solo.add_usage(5, Usage { prompt: 10, cached: 0, completion: 0 });
+    assert_eq!(LocalLedger::merge(vec![solo]).total_tokens, 10);
+}
