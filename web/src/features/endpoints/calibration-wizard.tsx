@@ -14,6 +14,12 @@ import type { EndpointCfg, QuotaAnchors, QuotaCalibration, QuotaReading } from "
  *  provider's console, which the server validates when the derivation is attempted. */
 const REVEAL_TOKENS = 1_000_000;
 
+/** The three rates a derivation corrected, formatted for display. */
+function formatPrices(input: number, cached: number, output: number): string {
+  const f = (v: number) => (v >= 1 ? v.toFixed(2) : v.toPrecision(3));
+  return `${f(input)} / ${f(cached)} / ${f(output)}`;
+}
+
 /** A "resets in ..." countdown as three small boxes: days, hours, minutes.
  *  One box holding raw seconds was unusable - the value displayed a unit the user was not typing
  *  in, so every keystroke re-scaled the number under the cursor. Each box shows the unit it
@@ -286,8 +292,13 @@ export function CalibrationWizard({
           {derived ? (
             <div className="space-y-1.5 rounded-[2px] border border-[var(--line)] bg-[var(--panel)] p-2.5">
               <div className="label">{t.endpoints.calDerived}</div>
+              {/* The corrected rates are what the derivation produced; a bare multiplier would
+                  only restate the input the user already typed. */}
               <div className="mono text-xs text-[var(--ink)]">
-                {t.endpoints.calScale.replace("{n}", derived.scale.toFixed(4))}
+                {t.endpoints.calScale.replace(
+                  "{n}",
+                  formatPrices(endpoint.prices.input, endpoint.prices.cached_input, endpoint.prices.output),
+                )}
               </div>
               {derived.rolling_total > 0 ? (
                 <div className="mono text-xs">

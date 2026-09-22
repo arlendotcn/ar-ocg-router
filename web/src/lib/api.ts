@@ -159,8 +159,8 @@ export type CalibrationResult = {
   stage?: "start" | "finish" | "verify" | "cancel";
   recorded?: boolean;
   cancelled?: boolean;
-  /** finish: multiplier derived for the prices and the ledger. */
-  scale?: number;
+  /** finish: the factor by which the configured rates were wrong; applied to the rates alone. */
+  price_scale?: number;
   rolling_total?: number;
   weekly_total?: number;
   saved_prices?: boolean;

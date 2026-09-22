@@ -178,13 +178,14 @@ export type QuotaAnchors = {
  */
 export type QuotaCalibration = {
   calibrated_at: number;
-  /** Multiplier applied to the configured prices and the whole ledger to make them true money. */
-  scale: number;
   rolling_total: number;
   weekly_total: number;
   verified_at: number | null;
   residual_pp: number | null;
+  /** The console's percentages at `ref_at`: the level every derived window continues from. */
   ref_pct_month: number;
+  ref_pct_5h: number;
+  ref_pct_week: number;
   ref_at: number;
 };
 

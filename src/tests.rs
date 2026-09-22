@@ -11,6 +11,16 @@ fn ts(s: &str) -> i64 {
     timeutil::parse_iso8601(s).expect("timestamp")
 }
 
+/// Rates for the ledger tests. 1.0 per 1M tokens makes "tokens" and "money" interchangeable at a
+/// glance, so a test that cares about pricing can scale one rate and see the effect directly.
+const PRICES: crate::config::PricesCfg = crate::config::PricesCfg {
+    currency: String::new(),
+    input: 1.0,
+    output: 1.0,
+    cached_input: 1.0,
+    peak_multiplier: 1.0,
+};
+
 // ------------------------------------------------------------------ timeutil
 
 #[test]
@@ -486,11 +496,12 @@ fn an_empty_money_window_is_not_negative_zero() {
     use crate::state::LocalLedger;
 
     let l = LocalLedger::default();
+    let p = crate::config::PricesCfg { currency: "CNY".into(), input: 1.0, output: 1.0, cached_input: 1.0, peak_multiplier: 1.0 };
     for (name, v) in [
-        ("total", l.total_cost),
-        ("rolling", l.window_cost(1_000_000, 5 * 3600)),
-        ("weekly", l.window_cost(1_000_000, 7 * 86_400)),
-        ("monthly", l.window_cost(1_000_000, 30 * 86_400)),
+        ("total", l.cost_since(0, &p, false)),
+        ("rolling", l.window_cost(1_000_000, 5 * 3600, &p, false)),
+        ("weekly", l.window_cost(1_000_000, 7 * 86_400, &p, false)),
+        ("monthly", l.window_cost(1_000_000, 30 * 86_400, &p, false)),
     ] {
         assert_eq!(v.to_string(), "0", "{name} must not render as -0.0");
         assert!(v.is_sign_positive(), "{name} must carry no negative sign");
@@ -613,9 +624,9 @@ fn a_cycle_window_counts_from_its_own_start() {
 
     q.ledger = LocalLedger::default();
     // A request from the previous cycle must not count inside this one.
-    q.ledger.add(at("2026-08-20T00:00:00Z"), 70.0, 0);
-    q.ledger.add(at("2026-08-28T00:00:00Z"), 20.0, 0);
-    let r = q.report(at("2026-08-30T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg);
+    q.ledger.add_usage(at("2026-08-20T00:00:00Z"), crate::state::Usage { prompt: 70_000_000, cached: 0, completion: 0 });
+    q.ledger.add_usage(at("2026-08-28T00:00:00Z"), crate::state::Usage { prompt: 20_000_000, cached: 0, completion: 0 });
+    let r = q.report(at("2026-08-30T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg, &PRICES, false);
     assert!((r.monthly.used - 20.0).abs() < 1e-6, "only this cycle's 20 counts, got {}", r.monthly.used);
     assert!((r.monthly.pct - 10.0).abs() < 1e-6, "got {}", r.monthly.pct);
 
@@ -623,8 +634,8 @@ fn a_cycle_window_counts_from_its_own_start() {
     assert_eq!(r.monthly.resets_at, Some(at("2026-09-26T00:00:00Z")));
 
     // Past the reset the old request is gone, and the new cycle counts from zero.
-    q.ledger.add(at("2026-09-27T00:00:00Z"), 30.0, 0);
-    let r2 = q.report(at("2026-09-28T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg);
+    q.ledger.add_usage(at("2026-09-27T00:00:00Z"), crate::state::Usage { prompt: 30_000_000, cached: 0, completion: 0 });
+    let r2 = q.report(at("2026-09-28T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg, &PRICES, false);
     assert!((r2.monthly.used - 30.0).abs() < 1e-6, "got {}", r2.monthly.used);
     assert_eq!(r2.monthly.resets_at, Some(at("2026-10-26T00:00:00Z")));
 }
@@ -645,34 +656,46 @@ fn a_plan_without_a_cycle_keeps_the_sliding_window() {
         ..QuotaCfg::default()
     };
     q.ledger = LocalLedger::default();
-    q.ledger.add(at("2026-08-01T00:00:00Z"), 40.0, 0);
+    q.ledger.add_usage(at("2026-08-01T00:00:00Z"), crate::state::Usage { prompt: 40_000_000, cached: 0, completion: 0 });
 
     // 31 days later the sample has slid out of the 30-day window.
-    let r = q.report(at("2026-09-01T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg);
+    let r = q.report(at("2026-09-01T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg, &PRICES, false);
     assert_eq!(r.monthly.used, 0.0, "sliding window must still forget old samples");
     assert_eq!(r.monthly.resets_at, None, "a sliding window has no reset instant");
 
-    let r2 = q.report(at("2026-08-15T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg);
+    let r2 = q.report(at("2026-08-15T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg, &PRICES, false);
     assert!((r2.monthly.used - 40.0).abs() < 1e-6);
 }
 
 /// The derivation: two console readings around a known amount of forwarded consumption give the
-/// window totals and the true price scale. `scale = monthly * d_pct / (100 * L)`.
+/// window totals and the factor by which the configured rates were wrong.
+///
+/// The correction lands on the rates alone. Because the ledger stores tokens, pricing the same
+/// counts at the corrected rates reproduces the true money for the whole retained history - which
+/// is what the derivation needs, since the history it reasons about spans the corrected period.
 #[test]
-fn two_readings_derive_the_window_totals_and_price_scale() {
+fn two_readings_derive_the_window_totals_and_the_price_factor() {
+    use crate::config::{PricesCfg, QuotaCfg};
     use crate::state::{LocalLedger, QuotaCalibration, QuotaState};
 
     let at = |s: &str| timeutil::parse_iso8601(s).unwrap();
     let mut q = QuotaState::default();
     q.ledger = LocalLedger::default();
 
-    // Prices are entered at their ratio only (the user's 10 / 0.4 / 30 in RMB terms), so the ledger
-    // accumulates "weighted units" that are not yet real money.
+    // The rates are entered at their ratio only, so the tokens price out to "weighted units"
+    // rather than real money. 1 unit per 1000 tokens keeps the arithmetic legible.
+    let entered = PricesCfg {
+        currency: "RMB".into(),
+        input: 1.0,
+        output: 1.0,
+        cached_input: 1.0,
+        peak_multiplier: 1.0,
+    };
     let t1 = at("2026-08-28T00:00:00Z");
     let t2 = at("2026-08-29T00:00:00Z");
-    // 4 weighted units inside [t1, t2); the sample at t2 falls in the next window.
-    q.ledger.add(t1, 4.0, 1000);
-    q.ledger.add(t2, 20.0, 5000);
+    // 4000 tokens inside [t1, t2); the sample at t2 falls in the next window.
+    q.ledger.add_usage(t1, crate::state::Usage { prompt: 4000, cached: 0, completion: 0 });
+    q.ledger.add_usage(t2, crate::state::Usage { prompt: 5000, cached: 0, completion: 0 });
 
     // The console moved the monthly window from 32.00% to 44.00% over that window.
     let monthly = 200.0f64;
@@ -680,33 +703,45 @@ fn two_readings_derive_the_window_totals_and_price_scale() {
     // `cost_between` is half-open [t1, t2): the request stamped exactly at t1 was forwarded after
     // that reading was taken, while one exactly at t2 belongs to the next window. Summing the two
     // ends openly would double-count a boundary sample.
-    let l = q.ledger.cost_between(t1, t2);
-    assert!((l - 4.0).abs() < 1e-9, "only the t1 sample is inside, got {l}");
+    let l = q.ledger.cost_between(t1, t2, &entered, false);
+    assert!((l - 0.004).abs() < 1e-12, "only the t1 sample is inside, got {l}");
     let scale = monthly * d_month / (100.0 * l);
-    // 12% of 200 = 24 true yuan over 4 weighted units: the entered prices were 4/24 of the truth.
-    assert!((scale - 6.0).abs() < 1e-9, "got {scale}");
+    // 12% of 200 = 24 true yuan over 0.004 weighted units: the entered rates were 1/6000 of the
+    // truth, so the same token counts priced at 6000x reproduce the console.
+    assert!((scale - 6000.0).abs() < 1e-6, "got {scale}");
 
     // Same window, console said 1.0% -> 1.5%: total_5h = scale * L * 100 / d_pct.
     let d_5h = 1.5 - 1.0;
     let rolling_total = scale * l * 100.0 / d_5h;
     assert!((rolling_total - 4800.0).abs() < 1e-6, "got {rolling_total}");
 
-    // Rescaling the ledger must convert every recorded amount, including ones outside the window.
-    q.ledger.scale(scale);
-    assert!((q.ledger.cost_between(t1, t2) - 24.0).abs() < 1e-9, "the window rescaled");
+    // Correcting the rates alone fixes the history: the very same samples now price out to the
+    // money the console implied, with nothing rescaled in place.
+    let corrected = PricesCfg {
+        input: entered.input * scale,
+        output: entered.output * scale,
+        cached_input: entered.cached_input * scale,
+        ..entered.clone()
+    };
     assert!(
-        (q.ledger.total_cost - 24.0 * scale).abs() < 1e-9,
-        "the whole history rescaled too, got {}",
-        q.ledger.total_cost
+        (q.ledger.cost_between(t1, t2, &corrected, false) - 24.0).abs() < 1e-6,
+        "12% of 200 is 24, got {}",
+        q.ledger.cost_between(t1, t2, &corrected, false)
+    );
+    // Including the sample that lies outside the calibrated window.
+    assert!(
+        (q.ledger.cost_since(0, &corrected, false) - 54.0).abs() < 1e-6,
+        "9000 tokens at 6000 per 1000 is 54, got {}",
+        q.ledger.cost_since(0, &corrected, false)
     );
 
     // A calibration with no usable bucket resets reports no total rather than a wrong one.
-    let cal = QuotaCalibration { scale, rolling_total, weekly_total: 0.0, ..Default::default() };
+    let cal = QuotaCalibration { rolling_total, weekly_total: 0.0, ..Default::default() };
     q.calibration = Some(cal);
-    let report = q.report(t2, 3_600, 80.0, true, 99.0, &crate::config::QuotaCfg::default());
-    let v = q.to_json(t2, &report, "RMB", &crate::state::AccountStats::default());
-    assert_eq!(v["calibration"]["derived"]["scale"], 6.0);
+    let report = q.report(t2, 3_600, 80.0, true, 99.0, &QuotaCfg::default(), &corrected, false);
+    let v = q.to_json(t2, &report, "RMB", &crate::state::AccountStats::default(), &corrected, false);
     assert_eq!(v["calibration"]["derived"]["rolling_total"], 4800.0);
+    assert!(v["calibration"]["derived"].get("scale").is_none(), "scale is gone from the model");
 }
 
 /// A bucket's local percentage must line up with the provider's console, which means summing from
@@ -721,23 +756,24 @@ fn a_derived_bucket_reports_from_its_own_start() {
     let now = at("2026-08-28T03:00:00Z");
     // The console said this bucket resets in 2 hours, so it started 3 hours ago.
     let reset = now + 2 * 3600;
+    // `rolling_total` is money, so the samples are sized in tokens that price to the same money at
+    // PRICES (1.0 per 1M): 100 RMB of allowance, 30 spent inside the bucket.
     let total = 100.0f64;
-    // 30 spent inside the bucket, 50 only an hour before it began (must not count).
-    q.ledger.add(reset - 5 * 3600 - 3600, 50.0, 0);
-    q.ledger.add(reset - 3600, 30.0, 0);
+    q.ledger.add_usage(reset - 5 * 3600 - 3600, crate::state::Usage { prompt: 50_000_000, cached: 0, completion: 0 });
+    q.ledger.add_usage(reset - 3600, crate::state::Usage { prompt: 30_000_000, cached: 0, completion: 0 });
 
-    q.calibration = Some(QuotaCalibration { scale: 1.0, rolling_total: total, weekly_total: 0.0, ..Default::default() });
+    q.calibration = Some(QuotaCalibration { rolling_total: total, weekly_total: 0.0, ..Default::default() });
     // The anchor lives apart from the derivation: it is the bucket model, editable on its own.
     q.anchors = crate::state::QuotaAnchors { bucket_5h: reset, week_reset: 0 };
-    let report = q.report(now, 3_600, 80.0, true, 99.0, &crate::config::QuotaCfg::default());
-    let v = q.to_json(now, &report, "RMB", &crate::state::AccountStats::default());
+    let report = q.report(now, 3_600, 80.0, true, 99.0, &crate::config::QuotaCfg::default(), &PRICES, false);
+    let v = q.to_json(now, &report, "RMB", &crate::state::AccountStats::default(), &PRICES, false);
     assert_eq!(v["rolling"]["used"], 30.0, "only the in-bucket sample counts");
     assert_eq!(v["rolling"]["percent"], 30.0);
     assert_eq!(v["rolling"]["limit"], total);
     // The bucket rolls forward by whole periods, so a later read still finds a future reset.
     let later = reset + 3600;
-    let report2 = q.report(later, 3_600, 80.0, true, 99.0, &crate::config::QuotaCfg::default());
-    let v2 = q.to_json(later, &report2, "RMB", &crate::state::AccountStats::default());
+    let report2 = q.report(later, 3_600, 80.0, true, 99.0, &crate::config::QuotaCfg::default(), &PRICES, false);
+    let v2 = q.to_json(later, &report2, "RMB", &crate::state::AccountStats::default(), &PRICES, false);
     assert_eq!(v2["rolling"]["resets_at"], timeutil::iso8601(reset + 5 * 3600).as_str());
 }
 
@@ -761,7 +797,6 @@ fn calibration_state_round_trips_through_the_state_file() {
 
     let cal = QuotaCalibration {
         calibrated_at: 1_700_100_000,
-        scale: 1.2,
         rolling_total: 4800.0,
         weekly_total: 12_000.0,
         verified_at: 1_700_200_000,
@@ -773,7 +808,6 @@ fn calibration_state_round_trips_through_the_state_file() {
     };
     let j = cal.to_json();
     let back = QuotaCalibration::from_json(&j).unwrap();
-    assert!((back.scale - 1.2).abs() < 1e-9);
     assert_eq!(back.rolling_total, 4800.0);
     assert_eq!(back.verified_at, cal.verified_at);
     assert!((back.ref_pct_month - 44.0).abs() < 1e-9);
@@ -809,32 +843,32 @@ fn a_money_budget_without_a_probe_reports_its_currency_as_the_unit() {
     // 1. The Ark case as a user would write it: bounded windows, the currency only in prices.
     //    The unit defaults to "none" for a generic provider, yet the totals are RMB sums.
     let unstated = QuotaCfg { unit: QuotaUnit::None, ..money.clone() };
-    let r1 = q.report(1_000_000, 3_600, 80.0, true, 99.0, &unstated);
+    let r1 = q.report(1_000_000, 3_600, 80.0, true, 99.0, &unstated, &PRICES, false);
     assert_eq!(r1.accounting, Accounting::Money, "bounded windows are money");
     assert_eq!(
-        q.to_json(1_000_000, &r1, "RMB", &crate::state::AccountStats::default())["unit"],
+        q.to_json(1_000_000, &r1, "RMB", &crate::state::AccountStats::default(), &PRICES, false)["unit"],
         "rmb",
         "the console must be told the denomination, not shown a bare number"
     );
     // An endpoint with no currency label gets the unitless answer rather than an invented symbol.
-    assert_eq!(q.to_json(1_000_000, &r1, "", &crate::state::AccountStats::default())["unit"], "none");
+    assert_eq!(q.to_json(1_000_000, &r1, "", &crate::state::AccountStats::default(), &PRICES, false)["unit"], "none");
 
     // 2. A stated unit is already the answer; prices.currency must not override it.
     let stated = QuotaCfg { unit: QuotaUnit::Rmb, ..money.clone() };
-    let r2 = q.report(1_000_000, 3_600, 80.0, true, 99.0, &stated);
+    let r2 = q.report(1_000_000, 3_600, 80.0, true, 99.0, &stated, &PRICES, false);
     assert_eq!(r2.accounting, Accounting::Money);
-    assert_eq!(q.to_json(1_000_000, &r2, "USD", &crate::state::AccountStats::default())["unit"], "rmb", "the config wins over the label");
+    assert_eq!(q.to_json(1_000_000, &r2, "USD", &crate::state::AccountStats::default(), &PRICES, false)["unit"], "rmb", "the config wins over the label");
 
     let tok = QuotaCfg { unit: QuotaUnit::Tokens, ..money.clone() };
-    let r3 = q.report(1_000_000, 3_600, 80.0, true, 99.0, &tok);
+    let r3 = q.report(1_000_000, 3_600, 80.0, true, 99.0, &tok, &PRICES, false);
     assert_eq!(r3.accounting, Accounting::Tokens);
-    assert_eq!(q.to_json(1_000_000, &r3, "RMB", &crate::state::AccountStats::default())["unit"], "tokens");
+    assert_eq!(q.to_json(1_000_000, &r3, "RMB", &crate::state::AccountStats::default(), &PRICES, false)["unit"], "tokens");
 
     // 3. No windows at all: nothing to denominate, so it stays unitless even with prices present.
     let unbounded = QuotaCfg { unit: QuotaUnit::None, rolling: 0.0, weekly: 0.0, monthly: 0.0, ..money };
-    let r4 = q.report(1_000_000, 3_600, 80.0, true, 99.0, &unbounded);
+    let r4 = q.report(1_000_000, 3_600, 80.0, true, 99.0, &unbounded, &PRICES, false);
     assert_eq!(r4.accounting, Accounting::None, "an unbudgeted plan measures nothing");
-    assert_eq!(q.to_json(1_000_000, &r4, "RMB", &crate::state::AccountStats::default())["unit"], "none");
+    assert_eq!(q.to_json(1_000_000, &r4, "RMB", &crate::state::AccountStats::default(), &PRICES, false)["unit"], "none");
 }
 
 /// A probe can express a provider-side unit, so it wins: a plan metered in tokens by the provider
@@ -852,8 +886,8 @@ fn a_remote_probe_keeps_its_own_unit() {
         ..QuotaCfg::default()
     };
     let q = QuotaState::default();
-    let report = q.report(1_000_000, 3_600, 80.0, true, 99.0, &cfg);
-    assert_eq!(q.to_json(1_000_000, &report, "USD", &crate::state::AccountStats::default())["unit"], "tokens");
+    let report = q.report(1_000_000, 3_600, 80.0, true, 99.0, &cfg, &PRICES, false);
+    assert_eq!(q.to_json(1_000_000, &report, "USD", &crate::state::AccountStats::default(), &PRICES, false)["unit"], "tokens");
 }
 
 
@@ -929,26 +963,32 @@ fn account_stats_serialise_in_flight_with_its_diagnostic_floor() {
 #[test]
 fn the_ledger_keeps_the_window_a_calibration_reads_from() {
     // A calibration measures `cost_between(baseline, now)`. If persisting the ledger dropped the
-    // samples between those two instants, that difference would come out short and the derived
-    // scale too large - a wrong answer rather than a rounding error. The whole retained window has
-    // to survive a save/load cycle.
+    // samples between those two instants, that difference would come out short and the correction
+    // factor too large - a wrong answer rather than a rounding error. The whole retained window has
+    // to survive a save/load cycle, and it has to keep the per-class counts, since those are what
+    // pricing needs.
     let mut l = crate::state::LocalLedger::default();
     let start = 1_700_000_000i64;
     for i in 0..5_000i64 {
-        l.add(start + i, 1.0, 100);
+        l.add_usage(start + i, crate::state::Usage { prompt: 100, cached: 20, completion: 10 });
     }
     // Baseline two thirds of the way in; everything after it is what a calibration would measure.
     let baseline = start + 2_000;
-    let before = l.cost_between(baseline, start + 5_000);
-    assert_eq!(before, 3_000.0, "3000 samples at 1.0 each after the baseline");
+    let before = l.cost_between(baseline, start + 5_000, &PRICES, false);
+    // `cached` is a subset of `prompt`, so a sample bills prompt + completion, not all three.
+    // 3000 samples of 110 billable tokens at 1.0 per 1M is 0.33.
+    assert!((before - 0.33).abs() < 1e-9, "got {before}");
 
     let restored = crate::state::LocalLedger::from_state_json(&l.to_state_json());
     assert_eq!(
-        restored.cost_between(baseline, start + 5_000),
+        restored.cost_between(baseline, start + 5_000, &PRICES, false),
         before,
         "the persisted ledger must answer the same question as the in-memory one"
     );
-    assert_eq!(restored.total_cost, l.total_cost);
+    assert_eq!(restored.total_tokens, l.total_tokens);
+    // The split survives: pricing needs it, and a lost split would silently reprice every cached
+    // token at the fresh-input rate.
+    assert_eq!(restored.usage_since(baseline), l.usage_since(baseline));
 }
 
 #[test]
@@ -956,7 +996,7 @@ fn the_ledger_stays_in_time_order_across_a_restart() {
     let mut l = crate::state::LocalLedger::default();
     let start = 1_700_000_000i64;
     for i in 0..50i64 {
-        l.add(start + i, 0.5, 10);
+        l.add_usage(start + i, crate::state::Usage { prompt: 10, cached: 0, completion: 0 });
     }
     let restored = crate::state::LocalLedger::from_state_json(&l.to_state_json());
     let stamps: Vec<i64> = restored.samples.iter().map(|s| s.ts).collect();
@@ -971,7 +1011,6 @@ fn an_empty_ledger_round_trips_to_nothing() {
     let l = crate::state::LocalLedger::default();
     let restored = crate::state::LocalLedger::from_state_json(&l.to_state_json());
     assert!(restored.samples.is_empty());
-    assert_eq!(restored.total_cost, 0.0);
     assert_eq!(restored.total_tokens, 0);
 }
 
@@ -983,36 +1022,52 @@ fn the_accumulated_progress_comes_from_the_ledger_not_the_counters() {
     // ledger makes the figure survive both a reset and a restart.
     let mut l = crate::state::LocalLedger::default();
     let t0 = ts("2026-09-01T00:00:00Z");
-    l.add_usage(t0 - 10, 9.0, 900, 800, 700, 100);
-    l.add_usage(t0 + 10, 1.0, 100, 80, 60, 20);
-    l.add_usage(t0 + 20, 2.0, 200, 150, 100, 50);
+    l.add_usage(t0 - 10, crate::state::Usage { prompt: 800, cached: 700, completion: 100 });
+    l.add_usage(t0 + 10, crate::state::Usage { prompt: 80, cached: 60, completion: 20 });
+    l.add_usage(t0 + 20, crate::state::Usage { prompt: 150, cached: 100, completion: 50 });
 
     let (prompt, cached, completion) = l.usage_since(t0);
     assert_eq!(prompt, 230, "only the samples at or after the baseline count");
     assert_eq!(cached, 160);
     assert_eq!(completion, 70);
-    assert_eq!(l.cost_since(t0), 3.0);
+    // `cached` is a subset of `prompt`, so the billable total is prompt + completion:
+    // 300 tokens at 1.0 per 1M.
+    assert!((l.cost_since(t0, &PRICES, false) - 0.0003).abs() < 1e-12);
 
     let restored = crate::state::LocalLedger::from_state_json(&l.to_state_json());
     assert_eq!(restored.usage_since(t0), (prompt, cached, completion));
-    assert_eq!(restored.cost_since(t0), 3.0);
+    assert!((restored.cost_since(t0, &PRICES, false) - 0.0003).abs() < 1e-12);
 }
 
+/// Older state files carried money in the samples. The counts are what the ledger means now, so
+/// they are loaded and the money column is discarded - a rate frozen in an old file cannot be
+/// trusted to price anything today.
 #[test]
-fn an_older_ledger_file_keeps_its_cost_and_totals() {
-    // Samples written before the per-class split existed have three fields. They must load with
-    // their money intact and report zero for the split, rather than being discarded.
+fn older_ledger_files_load_their_token_counts() {
+    // Three shapes have existed: money + a bare total, money + the full split, and the current
+    // tokens-only form.
     let v = serde_json::json!({
         "total_cost": 5.0,
         "total_tokens": 500,
-        "samples": [[1700000000, 2.0, 200], [1700000100, 3.0, 300]],
+        "samples": [
+            [1700000000, 2.0, 200],
+            [1700000100, 3.0, 300, 100, 40, 160],
+            [1700000200, 700, 20, 5],
+        ],
     });
     let l = crate::state::LocalLedger::from_state_json(&v);
-    assert_eq!(l.samples.len(), 2, "old samples are not dropped");
-    assert_eq!(l.total_cost, 5.0);
-    assert_eq!(l.cost_since(1699999999), 5.0, "the money is real and kept");
-    assert_eq!(l.tokens_since(1699999999), 500);
-    assert_eq!(l.usage_since(1699999999), (0, 0, 0), "no split was recorded");
+    assert_eq!(l.samples.len(), 3, "every readable sample is kept");
+    assert_eq!(l.total_tokens, 500, "the file's own total is taken as written");
+
+    let s0 = l.samples[0];
+    assert_eq!((s0.prompt, s0.cached, s0.completion), (0, 0, 200), "a bare total is kept as output");
+    let s1 = l.samples[1];
+    assert_eq!((s1.prompt, s1.cached, s1.completion), (100, 40, 160), "the split is preserved");
+    let s2 = l.samples[2];
+    assert_eq!((s2.prompt, s2.cached, s2.completion), (700, 20, 5), "tokens-only is read as-is");
+
+    // And the whole thing prices out from the counts, not from the file's money column.
+    assert!(l.cost_since(0, &PRICES, false) > 0.0);
 }
 
 // ------------------------------------------------------------------ projection
@@ -1037,10 +1092,10 @@ fn a_cycle_the_ledger_only_partly_covers_reports_no_projection() {
     let mut q = QuotaState::default();
     q.ledger = LocalLedger::default();
     // The cycle began 2026-08-26, but the ledger's first sample is a day before the end of it.
-    q.ledger.add(at("2026-09-24T00:00:00Z"), 20.0, 0);
-    q.ledger.add(at("2026-09-24T12:00:00Z"), 20.0, 0);
+    q.ledger.add_usage(at("2026-09-24T00:00:00Z"), crate::state::Usage { prompt: 20_000_000, cached: 0, completion: 0 });
+    q.ledger.add_usage(at("2026-09-24T12:00:00Z"), crate::state::Usage { prompt: 20_000_000, cached: 0, completion: 0 });
 
-    let r = q.report(at("2026-09-25T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg);
+    let r = q.report(at("2026-09-25T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg, &PRICES, false);
     assert!(r.monthly.has_data, "the used percentage is still real");
     assert!((r.monthly.pct - 20.0).abs() < 1e-6, "40 of 200 is 20%, got {}", r.monthly.pct);
     assert_eq!(
@@ -1073,12 +1128,12 @@ fn a_fully_observed_cycle_projects_without_running_away() {
     let cfg = QuotaCfg { cycle_day: 27, ..cfg };
     let mut q = QuotaState::default();
     q.ledger = LocalLedger::default();
-    q.ledger.add(at("2026-08-27T00:00:00Z"), 1.0, 0);
-    q.ledger.add(at("2026-09-11T00:00:00Z"), 19.0, 0);
+    q.ledger.add_usage(at("2026-08-27T00:00:00Z"), crate::state::Usage { prompt: 1_000_000, cached: 0, completion: 0 });
+    q.ledger.add_usage(at("2026-09-11T00:00:00Z"), crate::state::Usage { prompt: 19_000_000, cached: 0, completion: 0 });
 
     // The cycle runs 2026-08-27 -> 2026-09-27 (31 days), so 15 of 31 have elapsed (fraction 0.4839).
     // 20 of 200 in the window is 10%; at that rate the cycle ends near 10/0.4839 = 20.7%.
-    let r = q.report(at("2026-09-11T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg);
+    let r = q.report(at("2026-09-11T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg, &PRICES, false);
     assert!((r.monthly.pct - 10.0).abs() < 1e-6, "20 of 200 is 10%, got {}", r.monthly.pct);
     assert!(
         r.monthly.projected_pct > r.monthly.pct,
@@ -1095,9 +1150,9 @@ fn a_fully_observed_cycle_projects_without_running_away() {
     // ledger opens exactly at the cycle start, which is the boundary the coverage check allows.
     let mut q2 = QuotaState::default();
     q2.ledger = LocalLedger::default();
-    q2.ledger.add(at("2026-08-27T00:00:00Z"), 0.5, 0);
-    q2.ledger.add(at("2026-08-27T00:00:01Z"), 2.0, 0);
-    let edge = q2.report(at("2026-08-27T00:00:02Z"), 3_600, 80.0, true, 99.0, &cfg);
+    q2.ledger.add_usage(at("2026-08-27T00:00:00Z"), crate::state::Usage { prompt: 500_000, cached: 0, completion: 0 });
+    q2.ledger.add_usage(at("2026-08-27T00:00:01Z"), crate::state::Usage { prompt: 2_000_000, cached: 0, completion: 0 });
+    let edge = q2.report(at("2026-08-27T00:00:02Z"), 3_600, 80.0, true, 99.0, &cfg, &PRICES, false);
     assert!(
         edge.monthly.projected_pct < 999.0,
         "the anchor-day instant must be floored, got {}",
@@ -1115,9 +1170,9 @@ fn a_sliding_window_still_reports_no_projection() {
     let cfg = QuotaCfg { unit: QuotaUnit::Rmb, monthly: 200.0, cycle_day: 0, ..QuotaCfg::default() };
     let mut q = QuotaState::default();
     q.ledger = LocalLedger::default();
-    q.ledger.add(at("2026-09-01T00:00:00Z"), 30.0, 0);
+    q.ledger.add_usage(at("2026-09-01T00:00:00Z"), crate::state::Usage { prompt: 30_000_000, cached: 0, completion: 0 });
 
-    let r = q.report(at("2026-09-02T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg);
+    let r = q.report(at("2026-09-02T00:00:00Z"), 3_600, 80.0, true, 99.0, &cfg, &PRICES, false);
     assert_eq!(r.monthly.resets_at, None);
     assert_eq!(r.monthly.projected_pct, r.monthly.pct);
 }
@@ -1137,10 +1192,9 @@ fn the_monthly_level_anchors_on_the_calibration_reference() {
     // at the reference instant; the ledger then recorded 1.0 more.
     let mut q = QuotaState::default();
     q.ledger = LocalLedger::default();
-    q.ledger.add(at("2026-09-21T13:30:00Z"), 1.0, 0);
+    q.ledger.add_usage(at("2026-09-21T13:30:00Z"), crate::state::Usage { prompt: 1_000_000, cached: 0, completion: 0 });
     q.calibration = Some(QuotaCalibration {
         calibrated_at: at("2026-09-21T13:04:00Z"),
-        scale: 0.0812,
         rolling_total: 13.24,
         weekly_total: 99.39,
         verified_at: 0,
@@ -1151,7 +1205,7 @@ fn the_monthly_level_anchors_on_the_calibration_reference() {
         ref_at: at("2026-09-21T13:04:00Z"),
     });
 
-    let r = q.report(at("2026-09-21T14:00:00Z"), 3_600, 80.0, true, 99.0, &cfg);
+    let r = q.report(at("2026-09-21T14:00:00Z"), 3_600, 80.0, true, 99.0, &cfg, &PRICES, false);
     assert!(
         (r.monthly.pct - 44.78).abs() < 0.01,
         "44.28% at the reference plus 1.0 of 200 is 44.78%, got {}",
@@ -1172,10 +1226,9 @@ fn a_stale_reference_yields_to_the_new_cycle() {
 
     let mut q = QuotaState::default();
     q.ledger = LocalLedger::default();
-    q.ledger.add(at("2026-09-26T00:00:01Z"), 10.0, 0);
+    q.ledger.add_usage(at("2026-09-26T00:00:01Z"), crate::state::Usage { prompt: 10_000_000, cached: 0, completion: 0 });
     q.calibration = Some(QuotaCalibration {
         calibrated_at: at("2026-09-21T13:04:00Z"),
-        scale: 0.0812,
         rolling_total: 13.24,
         weekly_total: 99.39,
         verified_at: 0,
@@ -1186,7 +1239,7 @@ fn a_stale_reference_yields_to_the_new_cycle() {
         ref_at: at("2026-09-21T13:04:00Z"),
     });
 
-    let r = q.report(at("2026-09-26T01:00:00Z"), 3_600, 80.0, true, 99.0, &cfg);
+    let r = q.report(at("2026-09-26T01:00:00Z"), 3_600, 80.0, true, 99.0, &cfg, &PRICES, false);
     assert!(
         (r.monthly.pct - 5.0).abs() < 1e-6,
         "the new cycle reads the ledger alone: 10 of 200 is 5%, got {}",
@@ -1209,12 +1262,11 @@ fn a_derived_bucket_anchors_on_the_reference_when_the_ledger_starts_late() {
     // The weekly bucket opened 2026-09-20T15:28Z; the ledger only begins the next morning.
     let mut q = QuotaState::default();
     q.ledger = LocalLedger::default();
-    q.ledger.add(at("2026-09-21T13:30:00Z"), 1.0, 0);
+    q.ledger.add_usage(at("2026-09-21T13:30:00Z"), crate::state::Usage { prompt: 1_000_000, cached: 0, completion: 0 });
     q.anchors.bucket_5h = at("2026-09-21T17:29:00Z");
     q.anchors.week_reset = at("2026-09-27T15:28:00Z");
     q.calibration = Some(QuotaCalibration {
         calibrated_at: at("2026-09-21T13:04:00Z"),
-        scale: 0.0812,
         rolling_total: 13.24,
         weekly_total: 99.39,
         verified_at: 0,
@@ -1225,7 +1277,9 @@ fn a_derived_bucket_anchors_on_the_reference_when_the_ledger_starts_late() {
         ref_at: at("2026-09-21T13:04:00Z"),
     });
 
-    let j = q.to_json(at("2026-09-21T14:00:00Z"), &q.report(at("2026-09-21T14:00:00Z"), 3_600, 80.0, true, 99.0, &cfg), "", &crate::state::AccountStats::default());
+    let now = at("2026-09-21T14:00:00Z");
+    let report = q.report(now, 3_600, 80.0, true, 99.0, &cfg, &PRICES, false);
+    let j = q.to_json(now, &report, "", &crate::state::AccountStats::default(), &PRICES, false);
     // Weekly: 17.55% of 99.39 at the reference, plus the 1.0 forwarded since.
     let week = j.get("weekly").unwrap();
     let used = week.get("used").unwrap().as_f64().unwrap();
@@ -1239,4 +1293,34 @@ fn a_derived_bucket_anchors_on_the_reference_when_the_ledger_starts_late() {
     let roll = j.get("rolling").unwrap();
     let roll_used = roll.get("used").unwrap().as_f64().unwrap();
     assert!((roll_used - (13.24 * 0.1224 + 1.0)).abs() < 0.01, "got {}", roll_used);
+}
+
+/// An early sample format recorded money and a bare token total but left the per-class split at
+/// zero. That total is real usage: reading it as zero made every such request vanish from the
+/// quota the moment rates were applied, which silently shrank the ledger. Priced as output - the
+/// dearest class - so an unknown split never understates the spend.
+#[test]
+fn older_samples_keep_their_token_total_when_the_split_is_absent() {
+    let v = serde_json::json!({
+        "total_cost": 9.7,
+        "total_tokens": 119_902_482u64,
+        "samples": [
+            [1789986192, 0.05317374811516547, 654_891, 0, 0, 0],
+            [1789998703, 0.02111941876547312, 260_108, 259_803, 259_200, 305],
+        ],
+    });
+    let l = crate::state::LocalLedger::from_state_json(&v);
+    assert_eq!(l.samples.len(), 2);
+    assert_eq!(
+        (l.samples[0].prompt, l.samples[0].cached, l.samples[0].completion),
+        (0, 0, 654_891),
+        "a missing split keeps the total rather than dropping it"
+    );
+    assert_eq!(
+        (l.samples[1].prompt, l.samples[1].cached, l.samples[1].completion),
+        (259_803, 259_200, 305),
+        "a recorded split is used as-is"
+    );
+    // Both samples price out, so the money is recoverable from the counts alone.
+    assert!(l.cost_since(0, &PRICES, false) > 0.0);
 }

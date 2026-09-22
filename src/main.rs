@@ -548,7 +548,7 @@ fn print_plan(state: &Arc<proxy::AppState>) {
         println!();
         println!("accounts:");
         for acc in accounts.iter() {
-            let report = acc.rt.quota_report(now, &cfg, &acc.cfg.quota);
+            let report = acc.rt.quota_report(now, &cfg, &acc.cfg.quota, &acc.cfg.prices);
             println!(
                 "  [{}] {:<18} rules={} quota={} exhausted={} surplus={} cooldown={}s",
                 acc.cfg.kind.as_str(),
@@ -879,7 +879,7 @@ fn run_selftest(state: &Arc<proxy::AppState>) {
         // ---- quota / balance
         if acc.cfg.quota.probe == crate::config::QuotaProbe::Usage {
             let status = quota::refresh_usage(&agent, &acc.cfg, &acc.rt, now, &ua);
-            let report = acc.rt.quota_report(now, &cfg, &acc.cfg.quota);
+            let report = acc.rt.quota_report(now, &cfg, &acc.cfg.quota, &acc.cfg.prices);
             println!(
                 "    /usage   : {} | rolling {:.0}% weekly {:.0}% monthly {:.0}% | source={} exhausted={} surplus={}",
                 status,

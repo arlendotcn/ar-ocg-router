@@ -173,7 +173,7 @@ pub fn save(path: &Path, data: &Persisted, now: i64) -> Result<(), String> {
     }
     let mut ledgers = serde_json::Map::new();
     for (name, l) in &data.ledgers {
-        if l.total_cost == 0.0 && l.total_tokens == 0 && l.samples.is_empty() {
+        if l.total_tokens == 0 && l.samples.is_empty() {
             continue;
         }
         ledgers.insert(name.clone(), l.to_state_json());

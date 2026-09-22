@@ -2200,9 +2200,23 @@ fn statistics_survive_a_restart_until_they_are_reset() {
     // The usage ledger IS persisted now, on purpose. It is built from the same requests as the
     // statistics, which already live here, so keeping it in memory only meant the dashboard and the
     // quota decision described different periods (one lifetime, one since-restart).
+    //
+    // It stores token counts, not money: the rates that turn them into money are configuration, and
+    // correcting a rate has to correct the history it priced.
     assert!(
-        doc["ledgers"]["go-1"]["total_cost"].as_f64().unwrap_or(0.0) > 0.0,
+        doc["ledgers"]["go-1"]["total_tokens"].as_u64().unwrap_or(0) > 0,
         "the usage ledger is missing from the state file: {}",
+        text
+    );
+    let sample = &doc["ledgers"]["go-1"]["samples"][0];
+    assert!(
+        sample.as_array().is_some_and(|a| a.len() == 4),
+        "a sample is [ts, prompt, cached, completion]: {}",
+        sample
+    );
+    assert!(
+        doc["ledgers"]["go-1"].get("total_cost").is_none(),
+        "money must not be stored in the ledger: {}",
         text
     );
 

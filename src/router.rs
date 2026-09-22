@@ -321,7 +321,7 @@ impl Router {
         let mut plans_by_name: std::collections::HashMap<String, PlanClass> =
             std::collections::HashMap::new();
         for acc in usable.iter().filter(|a| side_of(a) == Side::Plans) {
-            let report = acc.rt.quota_report(now, cfg, &acc.cfg.quota);
+            let report = acc.rt.quota_report(now, cfg, &acc.cfg.quota, &acc.cfg.prices);
             let class = classify_plan(acc, &report);
             if class != PlanClass::Exhausted {
                 plans_available = true;
@@ -462,7 +462,7 @@ impl Router {
             let mut keep: Vec<Arc<Account>> = Vec::new();
             for acc in group {
                 let healthy = !acc.rt.in_cooldown(now);
-                let report = acc.rt.quota_report(now, cfg, &acc.cfg.quota);
+                let report = acc.rt.quota_report(now, cfg, &acc.cfg.quota, &acc.cfg.prices);
                 let rules_ok = acc.cfg.rules.iter().any(|r| rule_matches(*r, ctx));
                 let prefer_eligible = match acc.cfg.kind {
                     AccountKind::Plans => !report.exhausted && rules_ok,
@@ -527,7 +527,7 @@ impl Router {
             let mut keep: Vec<Arc<Account>> = Vec::new();
             for acc in group {
                 let healthy = !acc.rt.in_cooldown(now);
-                let report = acc.rt.quota_report(now, cfg, &acc.cfg.quota);
+                let report = acc.rt.quota_report(now, cfg, &acc.cfg.quota, &acc.cfg.prices);
                 let rules_ok = acc.cfg.rules.iter().any(|r| rule_matches(*r, ctx));
                 let prefer_eligible = match side {
                     Side::Plans => !report.exhausted && rules_ok,

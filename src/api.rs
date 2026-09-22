@@ -1006,8 +1006,9 @@ fn reading_pcts(doc: &Value) -> Result<(f64, f64, f64), String> {
 /// between them, which yields the window's total allowance - and, anchored on the plan price
 /// (`quota.monthly`), the true per-token value of input, cache and output.
 ///
-/// Stages: `start` records the first reading; `finish` records the second, derives, rescales the
-/// ledger and the configured prices into true money; `verify` compares a third reading with the
+/// Stages: `start` records the first reading; `finish` records the second, derives, and corrects
+/// the configured prices into true money (the ledger is untouched: it stores tokens); `verify`
+/// compares a third reading with the
 /// prediction and flags the derivation as proven when it lands close enough; `cancel` discards a
 /// pending first reading.
 fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder, name: &str) -> bool {
@@ -1023,6 +1024,7 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
         return true;
     };
     let now = crate::util::now_secs();
+    let peak = cfg.is_peak(now);
     match stage.as_str() {
         "cancel" => {
             // Only the unfinished half is discarded: a derivation that already completed is a
@@ -1121,7 +1123,13 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
                     return true;
                 }
             }
-            let l = rt.quota.lock().map(|q| q.ledger.cost_between(t1, t2)).unwrap_or(0.0);
+            // Priced at the rates currently configured: the ledger holds token counts, so this is
+            // what the forwarded traffic is worth at the rates the calibration is about to correct.
+            let l = rt
+                .quota
+                .lock()
+                .map(|q| q.ledger.cost_between(t1, t2, &acc_cfg.prices, peak))
+                .unwrap_or(0.0);
             if l <= 0.0 {
                 error_response(
                     req,
@@ -1145,6 +1153,13 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
                 return true;
             }
             // consumed_true = monthly * d_month/100 = scale * L  =>  scale = monthly * d_month / (100*L)
+            //
+            // `scale` is the factor by which the configured rates are wrong. It is applied to the
+            // rates alone: the ledger holds counts, so correcting the rates corrects every figure
+            // derived from it, including the history that produced the old ones. Nothing is
+            // rescaled in place, which is what made the old form hard to reason about - two numbers
+            // multiplied by the same factor could drift apart, and a second calibration compounded
+            // onto the first.
             let scale = acc_cfg.quota.monthly * d_month / (100.0 * l);
             if !scale.is_finite() || scale <= 0.0 {
                 error_response(req, out, 500, "derived a non-usable scale factor; check the configured prices");
@@ -1175,11 +1190,8 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
             } else {
                 scale * l * 100.0 / d_week
             };
-            // Convert the whole ledger into true money, then correct the configured prices the same
-            // way: both must describe the same consumption in the same unit from here on.
-            if let Ok(mut q) = rt.quota.lock() {
-                q.ledger.scale(scale);
-            }
+            // Correct the rates. The ledger is left alone: it stores tokens, and tokens do not
+            // change when a rate is corrected - only what they are worth does.
             let mut all = cfg.accounts.clone();
             if let Some(idx) = all.iter().position(|a| a.name == name) {
                 let p = &mut all[idx].prices;
@@ -1189,7 +1201,6 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
             }
             let cal = crate::state::QuotaCalibration {
                 calibrated_at: t2,
-                scale,
                 rolling_total,
                 weekly_total,
                 verified_at: 0,
@@ -1222,7 +1233,7 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
                 200,
                 &json!({
                     "stage": "finish",
-                    "scale": scale,
+                    "price_scale": scale,
                     "rolling_total": rolling_total,
                     "weekly_total": weekly_total,
                     "saved_prices": saved.is_ok(),
@@ -1250,8 +1261,14 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
             // Compare deltas, not absolutes: the absolute percentage also contains consumption from
             // before the router started counting, which the ledger cannot see. The delta between
             // two readings is pure forwarded traffic, which it can predict exactly.
-            let l = rt.quota.lock().map(|q| q.ledger.cost_between(cal.ref_at, t3)).unwrap_or(0.0);
-            let predicted = cal.scale * l / acc_cfg.quota.monthly * 100.0;
+            // `l` is already true money: the rates were corrected at derivation time, so the
+            // forwarded tokens price out to what the console should now report.
+            let l = rt
+                .quota
+                .lock()
+                .map(|q| q.ledger.cost_between(cal.ref_at, t3, &acc_cfg.prices, peak))
+                .unwrap_or(0.0);
+            let predicted = l / acc_cfg.quota.monthly * 100.0;
             let actual_delta = pct3 - cal.ref_pct_month;
             let residual = actual_delta - predicted;
             let verified = residual.abs() <= CALIBRATE_VERIFY_TOLERANCE_PP;
@@ -1447,7 +1464,7 @@ fn selftest_payload(state: &Arc<AppState>, acc: &AccountCfg, rt: &std::sync::Arc
         None
     };
     let quota = probe_status.map(|(kind, status)| {
-        let report = rt.quota_report(now, &cfg, &acc.quota);
+        let report = rt.quota_report(now, &cfg, &acc.quota, &acc.prices);
         let stale = report.source != crate::state::QuotaSource::Remote;
         // "backoff" is not a failure: the value is simply fresh already.
         let ok = !stale && !status.starts_with("error") && !status.starts_with("http");
