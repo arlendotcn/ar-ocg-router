@@ -179,17 +179,51 @@ weekly window whose readings cross its own reset, or move less than 0.3 points, 
 rather than derived from broken numbers, and the response says so. The end-of-cycle projection
 is only shown when the ledger has observed the cycle from its start - a ledger with half a
 cycle of history cannot extrapolate and reports the measured percentage alone.
+
+### The level a window is measured from
+
+A reading gives each window a level, and the window is then read as `level + what the ledger
+recorded since`. The level is stored as **money** - computed once, when the reading is taken
+(`total x percentage / 100`) - rather than as the percentage it came from. Money is what the
+allowance is measured in, so no read converts anything; a stored percentage would instead be
+re-multiplied by the plan total on every read, which lets a later correction to the plan silently
+rescale a level that describes an instant already past.
+
+The same reading has a second, independent use: **Sync remaining quota** re-anchors the level on
+what the console shows now. It moves the level and nothing else, because the corrected rates and the
+window totals are properties of the plan rather than of the current level - a resync never costs you
+a derivation. Reach for it when the allowance moved for reasons the router never saw, such as the
+same credential being used elsewhere.
+
+Editing `quota.monthly` is the one change that does retire a derivation, because both window totals
+are linear in it: after the change they are wrong by that ratio while the stored level stays where it
+was spent, and reconciling the two would mean rewriting the past. The derivation is **set aside**
+rather than destroyed - the ledger, which needs no totals, speaks until a fresh calibration replaces
+it, the console says so, and putting the plan value back restores it. Editing the rates or the
+promotion multiplier does **not** touch the totals (they cancel out of the derivation) and only
+changes the price of requests from that moment on.
+
 ### Per-token prices, and why there are no "deduction coefficients"
 
 An endpoint may declare what it charges:
 
 ```yaml
-prices: { currency: CNY, input: 1, output: 4, cached_input: 0.02, peak_multiplier: 2 }
+prices: { currency: CNY, input: 1, output: 4, cached_input: 0.02, peak_multiplier: 2, promo_multiplier: 1 }
 ```
 
 Priority is **the upstream's own reported cost > these rates > nothing** (no money is recorded
 rather than a guessed one). `currency` is a label: the router never converts, because two
 merchants' prices are not a currency pair and no exchange rate was ever quoted between them.
+
+`peak_multiplier` applies during the peak window. `promo_multiplier` is a whole-plan factor over all
+three rates, for a promotion or a plan-wide adjustment. They are separate because they answer
+different questions: peak pricing is a property of the clock, a promotion is a property of the plan
+and applies whenever a request happens. Absent or unusable means 1.0 for both.
+
+Changing any rate affects **later** requests only. Every ledger sample records what that request cost
+at the rates in force when it was forwarded, and that figure is frozen - a corrected rate or a new
+promotion cannot rewrite a period that has already been paid for. That is what makes it safe to apply
+a promotion mid-cycle.
 
 Providers bill different token classes at different rates, and that is expressed **here**, in the
 three rates — a cached input token costs 0.02 while a fresh one costs 1. The same three rates feed
