@@ -156,11 +156,17 @@ export type BackupEntry = {
 
 /** What a calibration stage answered. The shape varies by stage, so all fields are optional. */
 export type CalibrationResult = {
-  stage?: "start" | "finish" | "verify" | "cancel";
+  stage?: "start" | "finish" | "verify" | "cancel" | "sync" | "anchors";
   recorded?: boolean;
   cancelled?: boolean;
-  /** finish: the factor by which the configured rates were wrong; applied to the rates alone. */
-  price_scale?: number;
+  /** sync: the level was re-anchored on the provider's current reading. */
+  synced?: boolean;
+  /** sync: whether a derivation exists. Without one the level is anchored but future
+   *  consumption is still priced at whatever the config says. */
+  has_derivation?: boolean;
+  /** finish: the factor the configured rates were multiplied by. Reported only; the corrected
+   *  rates already carry its effect, so nothing stores it. */
+  rate_factor?: number;
   rolling_total?: number;
   weekly_total?: number;
   saved_prices?: boolean;

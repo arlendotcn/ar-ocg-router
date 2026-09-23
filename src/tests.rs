@@ -19,6 +19,7 @@ const PRICES: crate::config::PricesCfg = crate::config::PricesCfg {
     output: 1.0,
     cached_input: 1.0,
     peak_multiplier: 1.0,
+    promo_multiplier: 1.0,
 };
 
 // ------------------------------------------------------------------ timeutil
@@ -227,6 +228,7 @@ fn endpoint_prices_apply_the_peak_multiplier() {
         output: 0.60,
         cached_input: 0.003,
         peak_multiplier: 2.0,
+        promo_multiplier: 1.0,
     };
     let off = p.cost_of(1000, 400, 200, false);
     let want_off = (600.0 * 0.15 + 400.0 * 0.003 + 200.0 * 0.60) / 1_000_000.0;
@@ -496,7 +498,7 @@ fn an_empty_money_window_is_not_negative_zero() {
     use crate::state::LocalLedger;
 
     let l = LocalLedger::default();
-    let p = crate::config::PricesCfg { currency: "CNY".into(), input: 1.0, output: 1.0, cached_input: 1.0, peak_multiplier: 1.0 };
+    let p = crate::config::PricesCfg { currency: "CNY".into(), input: 1.0, output: 1.0, cached_input: 1.0, peak_multiplier: 1.0, promo_multiplier: 1.0 };
     for (name, v) in [
         ("total", l.cost_since(0)),
         ("rolling", l.window_cost(1_000_000, 5 * 3600)),
@@ -690,6 +692,7 @@ fn two_readings_derive_the_window_totals_and_the_price_factor() {
         output: 1.0,
         cached_input: 1.0,
         peak_multiplier: 1.0,
+    promo_multiplier: 1.0,
     };
     let t1 = at("2026-08-28T00:00:00Z");
     let t2 = at("2026-08-29T00:00:00Z");
@@ -1490,3 +1493,87 @@ fn the_local_ledger_month_is_cycle_aligned() {
     let v = q.to_json(now, &report, "RMB", &crate::state::AccountStats::default());
     assert_eq!(v["local_ledger"]["monthly"], 70.0, "a sliding window still reaches back 30 days");
 }
+
+/// A promotion scales every rate at once, and an absent or unusable value means "no promotion".
+#[test]
+fn the_promo_multiplier_scales_every_rate_and_defaults_to_one() {
+    let base = crate::config::PricesCfg {
+        currency: "RMB".into(),
+        input: 2.0,
+        output: 8.0,
+        cached_input: 1.0,
+        peak_multiplier: 2.0,
+        promo_multiplier: 1.0,
+    };
+    // 1M input, 1M output at the base rates: 2 + 8 = 10.
+    let plain = base.cost_of(1_000_000, 0, 1_000_000, false);
+    assert!((plain - 10.0).abs() < 1e-9, "got {plain}");
+
+    // Half price: every class is halved, so the total is too.
+    let promo = crate::config::PricesCfg { promo_multiplier: 0.5, ..base.clone() };
+    let half = promo.cost_of(1_000_000, 0, 1_000_000, false);
+    assert!((half - 5.0).abs() < 1e-9, "got {half}");
+
+    // It composes with peak pricing, and applies off-peak too: a promotion is a property of the
+    // plan, not of the clock.
+    let both = crate::config::PricesCfg { peak_multiplier: 3.0, promo_multiplier: 0.5, ..base.clone() };
+    let p = both.cost_of(1_000_000, 0, 1_000_000, true);
+    assert!((p - 15.0).abs() < 1e-9, "10 x 0.5 x 3, got {p}");
+
+    // Zero and negatives are not "free": they are unusable, and 1.0 is what unusable means here.
+    for bad in [0.0, -2.0] {
+        let cfg = crate::config::PricesCfg { promo_multiplier: bad, ..base.clone() };
+        let c = cfg.cost_of(1_000_000, 0, 1_000_000, false);
+        assert!((c - 10.0).abs() < 1e-9, "promo {bad} must behave as 1.0, got {c}");
+    }
+}
+
+/// Re-syncing the level moves the reference and nothing else.
+///
+/// A calibration derives the plan (rates, window totals); a resync only says "the level is this,
+/// now". The two are independent, so a resync must not cost the user a derivation.
+#[test]
+fn syncing_the_level_keeps_the_derivation() {
+    use crate::state::{AccountRuntime, QuotaCalibration};
+
+    let q = AccountRuntime::new("t");
+    q.quota.lock().unwrap().calibration = Some(QuotaCalibration {
+        rolling_total: 13.235,
+        weekly_total: 99.39,
+        ref_at: 1_000,
+        ref_pct_month: 44.28,
+        ref_pct_5h: 12.24,
+        ref_pct_week: 17.55,
+        verified_at: 1_500,
+        residual_pp: 0.31,
+        ..Default::default()
+    });
+
+    let had = q.set_reference(2_000, 30.0, 40.0, 55.5);
+    assert!(had, "a derivation exists and is reported as such");
+    {
+        let guard = q.quota.lock().unwrap();
+        let c = guard.calibration.as_ref().unwrap();
+        assert_eq!(c.ref_at, 2_000, "the reference moves to now");
+        assert_eq!(c.ref_pct_month, 55.5);
+        assert_eq!(c.ref_pct_5h, 30.0);
+        assert_eq!(c.ref_pct_week, 40.0);
+        // The plan is untouched: these describe the allowance, not the level.
+        assert_eq!(c.rolling_total, 13.235);
+        assert_eq!(c.weekly_total, 99.39);
+        // The old verification described the old reference, so it is dropped rather than left to
+        // report a disagreement that is only the resync itself.
+        assert_eq!(c.verified_at, 0);
+        assert_eq!(c.residual_pp, 0.0);
+    }
+
+    // With nothing derived, a resync records the reading but invents no totals.
+    let fresh = AccountRuntime::new("u");
+    let had = fresh.set_reference(2_000, 30.0, 40.0, 55.5);
+    assert!(!had, "no derivation to report");
+    let guard = fresh.quota.lock().unwrap();
+    assert!(guard.calibration.is_none(), "a resync never fabricates one");
+    let r = guard.reading.as_ref().expect("the reading is kept for a later calibration");
+    assert_eq!((r.pct_month, r.pct_5h, r.pct_week), (55.5, 30.0, 40.0));
+}
+

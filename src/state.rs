@@ -1166,6 +1166,41 @@ impl AccountRuntime {
         }
     }
 
+    /// Re-anchor the level on a fresh console reading, leaving any derivation in place.
+    ///
+    /// The reference percentages are where every derived window measures its level from, so moving
+    /// them forward re-bases the display on what the provider shows now. The rates and window totals
+    /// are properties of the plan rather than of the current level, so they survive: a resync is not
+    /// a re-derivation and must not cost the user one.
+    ///
+    /// Returns whether a derivation exists, so the caller can tell the user that consumption from
+    /// here on is still priced by whatever the config says when there is none.
+    pub fn set_reference(&self, now: i64, pct_5h: f64, pct_week: f64, pct_month: f64) -> bool {
+        let mut q = match self.quota.lock() {
+            Ok(q) => q,
+            Err(p) => p.into_inner(),
+        };
+        match q.calibration.as_mut() {
+            Some(c) => {
+                c.ref_at = now;
+                c.ref_pct_5h = pct_5h;
+                c.ref_pct_week = pct_week;
+                c.ref_pct_month = pct_month;
+                // The residual described the old reference; comparing against a moved one would
+                // report a disagreement that is only the resync itself.
+                c.verified_at = 0;
+                c.residual_pp = 0.0;
+                true
+            }
+            None => {
+                // Nothing derived yet. Record the reading so a later calibration can still use it,
+                // but do not invent a derivation: the window totals are unknown.
+                q.reading = Some(QuotaReading { at: now, pct_5h, pct_week, pct_month });
+                false
+            }
+        }
+    }
+
     /// Discard a derivation (used by `cancel` and when a fresh calibration replaces it).
     pub fn clear_calibration(&self) {
         if let Ok(mut q) = self.quota.lock() {

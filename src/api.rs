@@ -227,6 +227,7 @@ fn account_cfg_json(a: &AccountCfg) -> Value {
             "output": a.prices.output,
             "cached_input": a.prices.cached_input,
             "peak_multiplier": a.prices.peak_multiplier,
+            "promo_multiplier": a.prices.promo_multiplier,
         },
         "inject_session": a.inject_session,
         "headers": Value::Object(headers),
@@ -583,11 +584,23 @@ fn endpoint_yaml(
         .and_then(|p| p.get("peak_multiplier"))
         .and_then(|v| v.as_f64())
         .unwrap_or_else(|| live.map(|a| a.prices.peak_multiplier).unwrap_or(1.0));
+    // Written only when it is doing something, so a config round-trip does not accumulate noise.
+    let promo = e
+        .get("prices")
+        .and_then(|p| p.get("promo_multiplier"))
+        .and_then(|v| v.as_f64())
+        .filter(|v| *v > 0.0)
+        .unwrap_or_else(|| live.map(|a| a.prices.promo_multiplier).unwrap_or(1.0));
     if i > 0.0 || o > 0.0 || ci > 0.0 {
         let cur = if cur.trim().is_empty() { "USD".to_string() } else { cur };
+        let promo_part = if (promo - 1.0).abs() > f64::EPSILON {
+            format!(", promo_multiplier: {promo}")
+        } else {
+            String::new()
+        };
         s.push_str(&format!(
-            "prices: {{ currency: {}, input: {}, output: {}, cached_input: {}, peak_multiplier: {} }}\n",
-            cur, i, o, ci, pm
+            "prices: {{ currency: {}, input: {}, output: {}, cached_input: {}, peak_multiplier: {}{} }}\n",
+            cur, i, o, ci, pm, promo_part
         ));
         s.push_str(cont);
     }
@@ -1055,6 +1068,39 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
             crate::persist::mark_dirty();
             log_info!("[{}] calibration baseline recorded", name);
             json_response(req, out, 200, &json!({"stage": "start", "recorded": true}));
+        }
+        "sync" => {
+            // Re-anchor the displayed level on what the provider shows right now.
+            //
+            // This is the second use of a console reading, and the only one that is not part of the
+            // derivation: it aligns the level without touching the rates or the window totals a
+            // calibration already derived. Those describe the plan, not the current level, so a
+            // resync has no reason to invalidate them. It matters when the allowance moved for
+            // reasons the router never saw - the same credential used elsewhere, or a promotion
+            // applied upstream.
+            let (p5, pw, pm) = match reading_pcts(&doc) {
+                Ok(v) => v,
+                Err(e) => {
+                    error_response(req, out, 400, &e);
+                    return true;
+                }
+            };
+            let has_derived = rt.set_reference(now, p5, pw, pm);
+            crate::persist::mark_dirty();
+            log_info!("[{}] quota level resynced to {:.2}% (monthly)", name, pm);
+            json_response(
+                req,
+                out,
+                200,
+                &json!({
+                    "stage": "sync",
+                    "synced": true,
+                    // Worth telling the user: without a derivation there are no corrected rates,
+                    // so the level is anchored but future consumption is still priced at whatever
+                    // the config says.
+                    "has_derivation": has_derived,
+                }),
+            );
         }
         "anchors" => {
             // The console's reset countdowns, applicable the moment they arrive. Kept apart from

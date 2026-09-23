@@ -170,6 +170,12 @@ pub struct PricesCfg {
     pub cached_input: f64,
     /// Multiplier applied during the provider's peak window; 1.0 means "no peak pricing".
     pub peak_multiplier: f64,
+    /// A promotion or plan-wide adjustment applied to every rate, on top of the base numbers.
+    ///
+    /// Separate from `peak_multiplier` because the two answer different questions: peak pricing is a
+    /// property of the clock, a promotion is a property of the plan and applies whenever a request
+    /// happens. 1.0 means "no promotion", which is also what an absent or unusable value means.
+    pub promo_multiplier: f64,
 }
 
 impl Default for PricesCfg {
@@ -181,6 +187,7 @@ impl Default for PricesCfg {
             output: 0.0,
             cached_input: 0.0,
             peak_multiplier: 1.0,
+            promo_multiplier: 1.0,
         }
     }
 }
@@ -198,11 +205,11 @@ impl PricesCfg {
             + cached as f64 * self.cached_input
             + completion as f64 * self.output)
             / 1_000_000.0;
-        if peak && self.peak_multiplier > 0.0 {
-            base * self.peak_multiplier
-        } else {
-            base
-        }
+        // The promotion scales every class equally, so it can be applied to the total. Peak pricing
+        // is the same shape; both default to 1.0 and are ignored when non-positive.
+        let promo = if self.promo_multiplier > 0.0 { self.promo_multiplier } else { 1.0 };
+        let peak_mul = if peak && self.peak_multiplier > 0.0 { self.peak_multiplier } else { 1.0 };
+        base * promo * peak_mul
     }
 }
 
@@ -1138,6 +1145,12 @@ pub fn parse(raw: &str, path: &Path) -> Result<Config, String> {
                     .unwrap_or(0.0);
                 prices.peak_multiplier = yget_any(pm, &["peak_multiplier", "peak_factor"])
                     .map(|v| yfloat(v, 1.0))
+                    .unwrap_or(1.0);
+                // A promotion is a whole-plan adjustment, so it has no "wrong direction" to warn
+                // about the way peak pricing does. Absent, non-numeric or non-positive all mean 1.0.
+                prices.promo_multiplier = yget_any(pm, &["promo_multiplier", "promo", "discount_multiplier"])
+                    .map(|v| yfloat(v, 1.0))
+                    .filter(|v| *v > 0.0)
                     .unwrap_or(1.0);
                 if prices.input < 0.0 || prices.output < 0.0 || prices.cached_input < 0.0 {
                     warnings.push(format!("{}[{}].prices has a negative rate, ignoring the block", key, idx));

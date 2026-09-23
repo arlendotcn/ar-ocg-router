@@ -356,10 +356,22 @@ export function CalibrationWizard({
               disabled={!!pending && !editingBase}
             />
             {!pending ? (
-              <Button size="sm" variant="outline" disabled={busy}
-                onClick={() => void run("start", base)}>
-                {t.endpoints.calRecord1}
-              </Button>
+              <div className="space-y-1">
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" variant="outline" disabled={busy}
+                    onClick={() => void run("start", base)}>
+                    {t.endpoints.calRecord1}
+                  </Button>
+                  {/* Aligning the level is not part of a derivation: it moves the reference the
+                      windows are measured from without touching the rates or their totals, so it
+                      is available whenever a console reading is worth copying. */}
+                  <Button size="sm" variant="ghost" disabled={busy}
+                    onClick={() => void run("sync", base, true)}>
+                    {t.endpoints.calSync}
+                  </Button>
+                </div>
+                <div className="text-2xs text-[var(--ink-faint)]">{t.endpoints.calSyncHint}</div>
+              </div>
             ) : editingBase ? (
               <div className="flex gap-2">
                 <Button size="sm" variant="primary" disabled={busy}

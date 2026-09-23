@@ -205,7 +205,15 @@ export type EndpointCfg = {
    *  rewritten down to it. 0 (or absent) means the value is never touched. */
   max_output_tokens_limit: number;
   /** What this endpoint charges, in the provider's own currency. All zero = no money recorded. */
-  prices: { currency: string; input: number; output: number; cached_input: number; peak_multiplier: number };
+  prices: {
+    currency: string;
+    input: number;
+    output: number;
+    cached_input: number;
+    peak_multiplier: number;
+    /** Whole-plan factor over every rate; 1 means "no promotion". */
+    promo_multiplier: number;
+  };
   inject_session: boolean;
   headers: Record<string, string>;
   drop_params: string[];

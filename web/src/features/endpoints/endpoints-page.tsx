@@ -28,7 +28,7 @@ const BLANK: EndpointCfg = {
   rules: ["always"],
   no_error_fallback: false,
   max_output_tokens_limit: 0,
-  prices: { currency: "", input: 0, output: 0, cached_input: 0, peak_multiplier: 1 },
+  prices: { currency: "", input: 0, output: 0, cached_input: 0, peak_multiplier: 1, promo_multiplier: 1 },
   inject_session: false,
   headers: {},
   drop_params: [],

@@ -326,6 +326,16 @@ export function EndpointSheet({
                   onChange={(e) => setPrices({ peak_multiplier: Number(e.target.value) || 1 })}
                 />
               </Field>
+              {/* A promotion scales every rate, so it is not a fourth price but a factor over the
+                  three. Kept next to them because that is where a plan change gets applied. */}
+              <Field label={t.endpoints.pricePromo} help={t.endpoints.pricePromoHint}>
+                <Input
+                  type="number"
+                  step="any"
+                  value={draft.prices.promo_multiplier}
+                  onChange={(e) => setPrices({ promo_multiplier: Number(e.target.value) || 1 })}
+                />
+              </Field>
             </div>
           </div>
         </Section>
