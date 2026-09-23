@@ -827,6 +827,10 @@ fn calibration_state_round_trips_through_the_state_file() {
         ref_pct_5h: 0.0,
         ref_pct_week: 0.0,
         ref_at: 1_700_200_000,
+        baseline_monthly: 4800.0,
+        baseline_month: 2112.0,
+        baseline_5h: 0.0,
+        baseline_week: 0.0,
     };
     let j = cal.to_json();
     let back = QuotaCalibration::from_json(&j).unwrap();
@@ -1247,6 +1251,11 @@ fn the_monthly_level_anchors_on_the_calibration_reference() {
         ref_pct_5h: 0.0,
         ref_pct_week: 0.0,
         ref_at: at("2026-09-21T13:04:00Z"),
+        // What `finish` would have stored: 44.28% of the 200 plan, as money.
+        baseline_monthly: 200.0,
+        baseline_month: 88.56,
+        baseline_5h: 0.0,
+        baseline_week: 0.0,
     });
 
     let r = q.report(at("2026-09-21T14:00:00Z"), 3_600, 80.0, true, 99.0, &cfg);
@@ -1281,6 +1290,10 @@ fn a_stale_reference_yields_to_the_new_cycle() {
         ref_pct_5h: 0.0,
         ref_pct_week: 0.0,
         ref_at: at("2026-09-21T13:04:00Z"),
+        baseline_monthly: 200.0,
+        baseline_month: 88.56,
+        baseline_5h: 0.0,
+        baseline_week: 0.0,
     });
 
     let r = q.report(at("2026-09-26T01:00:00Z"), 3_600, 80.0, true, 99.0, &cfg);
@@ -1319,6 +1332,10 @@ fn a_derived_bucket_anchors_on_the_reference_when_the_ledger_starts_late() {
         ref_pct_5h: 12.24,
         ref_pct_week: 17.55,
         ref_at: at("2026-09-21T13:04:00Z"),
+        baseline_monthly: 200.0,
+        baseline_month: 88.56,
+        baseline_5h: 13.24 * 0.1224,
+        baseline_week: 99.39 * 0.1755,
     });
 
     let now = at("2026-09-21T14:00:00Z");
@@ -1549,7 +1566,7 @@ fn syncing_the_level_keeps_the_derivation() {
         ..Default::default()
     });
 
-    let had = q.set_reference(2_000, 30.0, 40.0, 55.5);
+    let had = q.set_reference(2_000, 200.0, 30.0, 40.0, 55.5);
     assert!(had, "a derivation exists and is reported as such");
     {
         let guard = q.quota.lock().unwrap();
@@ -1569,11 +1586,97 @@ fn syncing_the_level_keeps_the_derivation() {
 
     // With nothing derived, a resync records the reading but invents no totals.
     let fresh = AccountRuntime::new("u");
-    let had = fresh.set_reference(2_000, 30.0, 40.0, 55.5);
+    let had = fresh.set_reference(2_000, 200.0, 30.0, 40.0, 55.5);
     assert!(!had, "no derivation to report");
     let guard = fresh.quota.lock().unwrap();
     assert!(guard.calibration.is_none(), "a resync never fabricates one");
     let r = guard.reading.as_ref().expect("the reading is kept for a later calibration");
     assert_eq!((r.pct_month, r.pct_5h, r.pct_week), (55.5, 30.0, 40.0));
+}
+
+
+/// The level is money, so it is what a plan-value change cannot move.
+///
+/// The stored baseline is the money spent at the reference; the percentage is that money over the
+/// plan. Correcting the plan therefore moves the percentage and leaves the spend alone, which is the
+/// property the whole ledger is built on: what was already spent is a fact, and a configuration
+/// change cannot rewrite it.
+#[test]
+fn a_money_baseline_is_not_rescaled_by_a_plan_change() {
+    use crate::config::{QuotaCfg, QuotaUnit};
+    use crate::state::{LocalLedger, QuotaCalibration, QuotaState};
+
+    let at = |s: &str| timeutil::parse_iso8601(s).unwrap();
+    let mut q = QuotaState::default();
+    q.ledger = LocalLedger::default();
+    q.ledger.add_usage(at("2026-09-21T13:30:00Z"), crate::state::Usage { prompt: 1_000_000, cached: 0, completion: 0 }, 1.0);
+    q.calibration = Some(QuotaCalibration {
+        calibrated_at: at("2026-09-21T13:04:00Z"),
+        rolling_total: 13.24,
+        weekly_total: 99.39,
+        ref_pct_month: 44.28,
+        ref_at: at("2026-09-21T13:04:00Z"),
+        baseline_monthly: 200.0,
+        baseline_month: 88.56,
+        ..Default::default()
+    });
+
+    let now = at("2026-09-21T14:00:00Z");
+    let at200 = QuotaCfg { unit: QuotaUnit::Rmb, monthly: 200.0, cycle_day: 26, ..QuotaCfg::default() };
+    let r = q.report(now, 3_600, 80.0, true, 99.0, &at200);
+    assert!((r.monthly.used - 89.56).abs() < 0.01, "got {}", r.monthly.used);
+    assert!((r.monthly.pct - 44.78).abs() < 0.01, "got {}", r.monthly.pct);
+    assert!(!r.plan_changed, "the derivation matches the configured plan");
+
+    // The plan value was wrong and is corrected to 250. Both window totals are linear in that value,
+    // so they are now off by 250/200 while the stored money stays where it was spent - and the two
+    // cannot be reconciled without rewriting a level that describes the past. The derivation is set
+    // aside instead, and the ledger - which needs no totals - speaks until a fresh one replaces it.
+    let at250 = QuotaCfg { unit: QuotaUnit::Rmb, monthly: 250.0, cycle_day: 26, ..QuotaCfg::default() };
+    let r = q.report(now, 3_600, 80.0, true, 99.0, &at250);
+    assert!(r.plan_changed, "the mismatch is detected and reported");
+    assert!(
+        (r.monthly.used - 1.0).abs() < 1e-9,
+        "only the ledger is used while the derivation is retired, got {}",
+        r.monthly.used
+    );
+    // Nothing was destroyed, only set aside: putting the plan back restores the anchor.
+    let r = q.report(now, 3_600, 80.0, true, 99.0, &at200);
+    assert!(!r.plan_changed);
+    assert!((r.monthly.used - 89.56).abs() < 0.01, "got {}", r.monthly.used);
+    // And the record of what was spent is untouched by any of it.
+    assert!((q.ledger.cost_since(0) - 1.0).abs() < 1e-9);
+}
+
+/// A derivation written before the level was stored as money still anchors, through its percentage.
+///
+/// Those files have no baseline, so the fallback converts the reading once, on read, against the
+/// total it describes. Anything written since carries the money and never takes that path.
+#[test]
+fn a_derivation_without_a_money_baseline_still_anchors() {
+    use crate::config::{QuotaCfg, QuotaUnit};
+    use crate::state::{LocalLedger, QuotaCalibration, QuotaState};
+
+    let at = |s: &str| timeutil::parse_iso8601(s).unwrap();
+    let mut q = QuotaState::default();
+    q.ledger = LocalLedger::default();
+    q.ledger.add_usage(at("2026-09-21T13:30:00Z"), crate::state::Usage { prompt: 1_000_000, cached: 0, completion: 0 }, 1.0);
+    q.calibration = Some(QuotaCalibration {
+        calibrated_at: at("2026-09-21T13:04:00Z"),
+        rolling_total: 13.24,
+        weekly_total: 99.39,
+        ref_pct_month: 44.28,
+        ref_at: at("2026-09-21T13:04:00Z"),
+        // No baselines: the shape an older file loads as.
+        ..Default::default()
+    });
+
+    let cfg = QuotaCfg { unit: QuotaUnit::Rmb, monthly: 200.0, cycle_day: 26, ..QuotaCfg::default() };
+    let r = q.report(at("2026-09-21T14:00:00Z"), 3_600, 80.0, true, 99.0, &cfg);
+    assert!(
+        (r.monthly.used - 89.56).abs() < 0.01,
+        "200 x 44.28% plus 1.0 of forwarded traffic, got {}",
+        r.monthly.used
+    );
 }
 

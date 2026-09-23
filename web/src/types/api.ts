@@ -34,6 +34,8 @@ export type Quota = {
   /** The calibration wizard's state: a baseline awaiting the final reading, and/or a derivation. */
   calibration: {
     anchors: QuotaAnchors;
+    /** The derivation was made against a different plan value and is not being used. */
+    plan_changed: boolean;
     pending: (QuotaReading & {
       accumulated: { cost: number; prompt: number; cached: number; completion: number; total: number };
     }) | null;

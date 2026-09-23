@@ -538,14 +538,32 @@ pub struct QuotaCalibration {
     /// (pure forwarded traffic) rather than absolutes (which also contain usage the router never
     /// saw, e.g. whatever was spent before the endpoint was configured).
     ///
-    /// These are also the level anchors for every derived window: the percentage the console
-    /// displayed at `ref_at` is ground truth for that instant, and everything after it is the
-    /// ledger's correctly-priced consumption. Nothing before the reference is ever needed again -
-    /// a ledger that began mid-cycle is as good as a complete one once the reference exists.
+    /// The console reading at `ref_at` is ground truth for that instant, and everything after it is
+    /// the ledger's own consumption. Nothing before the reference is ever needed again - a ledger
+    /// that began mid-cycle is as good as a complete one once the reference exists.
+    ///
+    /// Kept as the raw reading (a verification compares percentages) and as the fallback for a file
+    /// written before the money form below existed.
     pub ref_pct_month: f64,
     pub ref_pct_5h: f64,
     pub ref_pct_week: f64,
     pub ref_at: i64,
+    /// What each window stood at when the reference was taken: `total x percentage / 100`, computed
+    /// then and stored, instead of being recomputed from the percentage on every read.
+    ///
+    /// Money is the single measure the allowance is kept in, so the level is a sum of money and no
+    /// read converts a percentage. Freezing it is also what keeps it honest: a later change to a
+    /// plan's total cannot silently rescale a level that describes an instant already past.
+    pub baseline_month: f64,
+    pub baseline_5h: f64,
+    pub baseline_week: f64,
+    /// The plan value these were derived against (`quota.monthly` at the time).
+    ///
+    /// Both window totals scale linearly with it, so a later correction to the plan invalidates
+    /// them: the totals would be wrong by that ratio while the stored money would not, and the two
+    /// cannot be reconciled without rewriting a past level. A mismatch is therefore reported as a
+    /// stale derivation and the ledger, which needs no totals, speaks instead.
+    pub baseline_monthly: f64,
 }
 
 impl QuotaCalibration {
@@ -560,6 +578,10 @@ impl QuotaCalibration {
             "ref_pct_5h": self.ref_pct_5h,
             "ref_pct_week": self.ref_pct_week,
             "ref_at": self.ref_at,
+            "baseline_month": self.baseline_month,
+            "baseline_5h": self.baseline_5h,
+            "baseline_week": self.baseline_week,
+            "baseline_monthly": self.baseline_monthly,
         })
     }
     pub fn from_json(v: &Value) -> Option<QuotaCalibration> {
@@ -582,6 +604,10 @@ impl QuotaCalibration {
             ref_pct_5h: g("ref_pct_5h"),
             ref_pct_week: g("ref_pct_week"),
             ref_at: gi("ref_at"),
+            baseline_month: g("baseline_month"),
+            baseline_5h: g("baseline_5h"),
+            baseline_week: g("baseline_week"),
+            baseline_monthly: g("baseline_monthly"),
         })
     }
 }
@@ -694,6 +720,9 @@ pub struct QuotaReport {
     pub rolling: QuotaView,
     pub weekly: QuotaView,
     pub monthly: QuotaView,
+    /// The derivation was made against a different plan value than the one configured now, so its
+    /// window totals cannot be trusted and only the ledger is used.
+    pub plan_changed: bool,
     /// The start of the current billing cycle, when the plan has one. Carried on the report because
     /// the ledger views are cycle-aligned: a consumer computing an amount from the ledger needs the
     /// same window boundary the percentage above it used, and the boundary is knowable only here.
@@ -839,7 +868,7 @@ impl QuotaState {
             QuotaUnit::Tokens => self.ledger.tokens_since(from) as f64,
             QuotaUnit::None => 0.0,
         };
-        let local = |period: i64, limit: f64, ref_anchor: Option<(i64, f64)>| -> Option<(f64, f64)> {
+        let local = |period: i64, limit: f64, ref_anchor: Option<(i64, f64, f64)>| -> Option<(f64, f64)> {
             if limit <= 0.0 || quota.unit == QuotaUnit::None {
                 return None;
             }
@@ -855,8 +884,12 @@ impl QuotaState {
             // by then the ledger has covered that new cycle from its start.
             let used = match cycle {
                 Some((cyc_start, _)) => match ref_anchor {
-                    Some((ref_at, ref_pct)) if ref_at >= cyc_start => {
-                        limit * ref_pct / 100.0 + ledger_sum(ref_at)
+                    Some((ref_at, baseline, ref_pct)) if ref_at >= cyc_start => {
+                        // A sum of money either side of the reference. The percentage form is only
+                        // reached for a file written before the baseline was stored as money.
+                        let anchor =
+                            if baseline > 0.0 { baseline } else { limit * ref_pct / 100.0 };
+                        anchor + ledger_sum(ref_at)
                     }
                     _ => ledger_sum(cyc_start),
                 },
@@ -871,9 +904,18 @@ impl QuotaState {
         let lp_weekly = local(PERIOD_WEEKLY, quota.weekly, None);
         // The monthly window anchors on the calibration reference when one is live: the ledger
         // sums only what it saw, and a ledger that began mid-cycle cannot know the level.
+        // A derivation carries the plan value it was made against. Both window totals are linear in
+        // that value, so a changed plan leaves them wrong by the ratio while the stored money stays
+        // frozen - the two cannot be reconciled without rewriting a level that describes the past.
+        // Such a derivation is set aside until a fresh calibration replaces it.
+        let plan_changed = self.calibration.as_ref().is_some_and(|c| {
+            c.baseline_monthly > 0.0 && (quota.monthly - c.baseline_monthly).abs() > 1e-9
+        });
         let ref_anchor = match &self.calibration {
-            Some(c) if c.ref_pct_month > 0.0 && c.ref_at > 0 => {
-                Some((c.ref_at, c.ref_pct_month))
+            Some(c)
+                if !plan_changed && c.ref_at > 0 && (c.baseline_month > 0.0 || c.ref_pct_month > 0.0) =>
+            {
+                Some((c.ref_at, c.baseline_month, c.ref_pct_month))
             }
             _ => None,
         };
@@ -914,6 +956,7 @@ impl QuotaState {
             rolling,
             weekly,
             monthly,
+            plan_changed,
             cycle_start: cycle.map(|(s, _)| s),
         }
     }
@@ -958,15 +1001,20 @@ impl QuotaState {
         // forwarded since. Summing the bucket instead would need the ledger to cover the whole
         // bucket, which a mid-cycle ledger never does for the first week. Once the bucket rolls
         // over past the reference, the sum is both available and exact, so it takes over.
-        let derived_view = |total: f64, window: i64, next_reset: Option<i64>, ref_pct: f64| -> Option<Value> {
+        let derived_view =
+            |total: f64, window: i64, next_reset: Option<i64>, baseline: f64, ref_pct: f64| -> Option<Value> {
             let reset = next_reset?;
             if total <= 0.0 || reset <= now {
                 return None;
             }
             let start = reset - window;
-            let ref_inside = ref_pct > 0.0 && ref_at > 0 && ref_at >= start && ref_at < reset;
+            let ref_inside = ref_at > 0
+                && ref_at >= start
+                && ref_at < reset
+                && (baseline > 0.0 || ref_pct > 0.0);
             let used = if ref_inside {
-                total * ref_pct / 100.0 + self.ledger.cost_since(ref_at)
+                let anchor = if baseline > 0.0 { baseline } else { total * ref_pct / 100.0 };
+                anchor + self.ledger.cost_since(ref_at)
             } else {
                 // No reference in this bucket: fall back to the bucket sum, which is only honest
                 // when the ledger reaches the bucket's start.
@@ -985,16 +1033,19 @@ impl QuotaState {
                 "has_data": true,
             }))
         };
-        let rolling_view = match &self.calibration {
+        // A derivation made against a different plan value is set aside (see `report`): its totals
+        // are off by the ratio the plan moved, so the ledger speaks instead.
+        let usable = self.calibration.as_ref().filter(|_| !report.plan_changed);
+        let rolling_view = match usable {
             Some(c) => {
-                derived_view(c.rolling_total, PERIOD_ROLLING, roll_forward(self.anchors.bucket_5h, PERIOD_ROLLING, now), c.ref_pct_5h)
+                derived_view(c.rolling_total, PERIOD_ROLLING, roll_forward(self.anchors.bucket_5h, PERIOD_ROLLING, now), c.baseline_5h, c.ref_pct_5h)
                     .unwrap_or_else(|| w(&report.rolling))
             }
             None => w(&report.rolling),
         };
-        let weekly_view = match &self.calibration {
+        let weekly_view = match usable {
             Some(c) => {
-                derived_view(c.weekly_total, PERIOD_WEEKLY, roll_forward(self.anchors.week_reset, PERIOD_WEEKLY, now), c.ref_pct_week)
+                derived_view(c.weekly_total, PERIOD_WEEKLY, roll_forward(self.anchors.week_reset, PERIOD_WEEKLY, now), c.baseline_week, c.ref_pct_week)
                     .unwrap_or_else(|| w(&report.weekly))
             }
             None => w(&report.weekly),
@@ -1029,6 +1080,9 @@ impl QuotaState {
             },
             "calibration": {
                 "anchors": self.anchors.to_json(),
+                // The derivation exists but was made against another plan value, so its totals are
+                // not being used. The console says so rather than showing a number it distrusts.
+                "plan_changed": report.plan_changed,
                 "pending": self.reading.as_ref().map(|r| {
                     // What the router forwarded since the reading was taken, per token class: the
                     // progress signal that tells the user when the second reading is worth entering.
@@ -1168,14 +1222,16 @@ impl AccountRuntime {
 
     /// Re-anchor the level on a fresh console reading, leaving any derivation in place.
     ///
-    /// The reference percentages are where every derived window measures its level from, so moving
-    /// them forward re-bases the display on what the provider shows now. The rates and window totals
-    /// are properties of the plan rather than of the current level, so they survive: a resync is not
-    /// a re-derivation and must not cost the user one.
+    /// The reference is where every window measures its level from, so moving it forward re-bases
+    /// the display on what the provider shows now. The rates and window totals are properties of the
+    /// plan rather than of the current level, so they survive: a resync is not a re-derivation and
+    /// must not cost the user one.
+    ///
+    /// `monthly` is the configured plan value, needed to turn the monthly percentage into money.
     ///
     /// Returns whether a derivation exists, so the caller can tell the user that consumption from
     /// here on is still priced by whatever the config says when there is none.
-    pub fn set_reference(&self, now: i64, pct_5h: f64, pct_week: f64, pct_month: f64) -> bool {
+    pub fn set_reference(&self, now: i64, monthly: f64, pct_5h: f64, pct_week: f64, pct_month: f64) -> bool {
         let mut q = match self.quota.lock() {
             Ok(q) => q,
             Err(p) => p.into_inner(),
@@ -1186,6 +1242,13 @@ impl AccountRuntime {
                 c.ref_pct_5h = pct_5h;
                 c.ref_pct_week = pct_week;
                 c.ref_pct_month = pct_month;
+                // The level is money, frozen at this instant. The two shorter windows scale against
+                // the totals the derivation established, which the reading is a percentage of.
+                let (rolling, weekly) = (c.rolling_total, c.weekly_total);
+                c.baseline_monthly = monthly;
+                c.baseline_month = monthly * pct_month / 100.0;
+                c.baseline_5h = rolling * pct_5h / 100.0;
+                c.baseline_week = weekly * pct_week / 100.0;
                 // The residual described the old reference; comparing against a moved one would
                 // report a disagreement that is only the resync itself.
                 c.verified_at = 0;
@@ -1313,6 +1376,7 @@ impl AccountRuntime {
                 rolling: blank,
                 weekly: blank,
                 monthly: blank,
+                plan_changed: false,
                 cycle_start: cycle_window(now, quota).map(|(s, _)| s),
             },
         }

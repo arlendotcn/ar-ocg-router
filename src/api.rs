@@ -1085,7 +1085,7 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
                     return true;
                 }
             };
-            let has_derived = rt.set_reference(now, p5, pw, pm);
+            let has_derived = rt.set_reference(now, acc_cfg.quota.monthly, p5, pw, pm);
             crate::persist::mark_dirty();
             log_info!("[{}] quota level resynced to {:.2}% (monthly)", name, pm);
             json_response(
@@ -1256,6 +1256,13 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
                 ref_pct_5h: p5,
                 ref_pct_week: pw,
                 ref_at: t2,
+                // The level is money, frozen now. Every window is read as "this much was already
+                // spent at the reference" plus what the ledger recorded since, so nothing converts a
+                // percentage later and a later plan change cannot rescale a level already past.
+                baseline_monthly: acc_cfg.quota.monthly,
+                baseline_month: acc_cfg.quota.monthly * pm / 100.0,
+                baseline_5h: rolling_total * p5 / 100.0,
+                baseline_week: weekly_total * pw / 100.0,
             };
             // The derivation succeeded: now, and only now, the pending reading is consumed.
             rt.clear_reading();

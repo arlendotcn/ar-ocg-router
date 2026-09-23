@@ -96,7 +96,7 @@ function remainingSeconds(anchor: number, period: number): number {
 function useCalibration(endpoint: EndpointCfg) {
   const { stats } = useStatsStream({ intervalMs: 5000 });
   const live = stats?.accounts.find((a) => a.name === endpoint.name)?.quota.calibration;
-  return live ?? { anchors: { bucket_5h: 0, week_reset: 0 }, pending: null, derived: null };
+  return live ?? { anchors: { bucket_5h: 0, week_reset: 0 }, plan_changed: false, pending: null, derived: null };
 }
 
 const PctRow = ({
@@ -171,6 +171,9 @@ export function CalibrationWizard({
   // A derivation is only real if it was stamped: the phantom all-zero object an earlier load bug
   // could write must not drive the status badge, the results block, or the verifier.
   const derived = cal.derived && cal.derived.calibrated_at > 0 ? cal.derived : null;
+  // The derivation is retired while the configured plan value differs from the one it was made
+  // against, so the panel says why the numbers above stopped moving rather than looking broken.
+  const planChanged = derived !== null && cal.plan_changed;
   React.useEffect(() => {
     if (!localAnchors) return;
     const fresh = cal.anchors;
@@ -292,6 +295,9 @@ export function CalibrationWizard({
           {derived ? (
             <div className="space-y-1.5 rounded-[2px] border border-[var(--line)] bg-[var(--panel)] p-2.5">
               <div className="label">{t.endpoints.calDerived}</div>
+              {planChanged ? (
+                <div className="text-2xs text-[var(--warn)]">{t.endpoints.calPlanChanged}</div>
+              ) : null}
               {/* The corrected rates are what the derivation produced; a bare multiplier would
                   only restate the input the user already typed. */}
               <div className="mono text-xs text-[var(--ink)]">
