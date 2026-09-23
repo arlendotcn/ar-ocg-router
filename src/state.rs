@@ -123,26 +123,25 @@ impl QuotaSource {
 /// Total observed usage in sliding windows, used when the provider has no usage API
 /// (or in addition to it).
 ///
-/// The ledger stores **tokens, never money**. Money is a function of the prices in force at the
-/// moment of reading, and the prices are configurable: folding them into the samples would freeze
-/// whatever rate was configured when each request happened, so correcting a price could never fix
-/// the history that rate produced, and re-deriving a price would have to rescale the whole ledger
-/// to stay consistent. Keeping the counts means a price correction applies everywhere at once,
-/// including backwards, and two models that share one allowance can be added up by pricing each
-/// with its own rates.
+/// Each sample records **what the request cost at the rates in force when it happened**, alongside
+/// the token counts. The cost is what the allowance is measured in, and it is frozen at the moment
+/// of the request: changing a rate later must not rewrite what was already spent, or a promotion
+/// would retroactively alter a period that has already been paid for. The token counts ride along
+/// for display and statistics, and for pricing anything that happens after a rate changes.
 #[derive(Debug, Default, Clone)]
 pub struct LocalLedger {
     pub samples: VecDeque<LedgerSample>,
     pub total_tokens: u64,
+    /// Sum of every sample's `cost`, kept so a lifetime total needs no traversal.
+    pub total_cost: f64,
 }
 
-/// One request's contribution to the ledger: when it happened and how many tokens of each class.
-///
-/// Per class rather than one total because the three are billed differently, and because the
-/// calibration shows the user how much of each class the router forwarded since a baseline.
+/// One request's contribution to the ledger.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LedgerSample {
     pub ts: i64,
+    /// What this request cost at the rates in force when it was forwarded. Frozen on purpose.
+    pub cost: f64,
     pub prompt: u64,
     pub cached: u64,
     pub completion: u64,
@@ -211,24 +210,30 @@ impl LocalLedger {
         // survives the in-memory window is written - see PERSISTED_SAMPLES for why dropping the
         // old ones is not an option.
         let keep = self.samples.len().min(PERSISTED_SAMPLES);
-        // [ts, prompt, cached, completion] - tokens only, in time order. Older files carried a
-        // money column; `from_state_json` reads those too and keeps the counts, dropping the money.
+        // [ts, cost, prompt, cached, completion], oldest first. `from_state_json` also reads the
+        // earlier shapes, so a file written by any previous version still loads.
         let samples: Vec<Value> = self
             .samples
             .iter()
             .skip(self.samples.len() - keep)
-            .map(|s| json!([s.ts, s.prompt, s.cached, s.completion]))
+            .map(|s| json!([s.ts, s.cost, s.prompt, s.cached, s.completion]))
             .collect();
         json!({
             "total_tokens": self.total_tokens,
+            "total_cost": self.total_cost,
             "samples": samples,
         })
     }
 
+    /// Samples written before the ledger recorded money have no cost of their own. They are marked
+    /// here and priced by `price_unpriced`, which the registry calls once the endpoint's rates are
+    /// known - the loader runs before the config is available. Every sample that carries its own
+    /// cost keeps it: that money was really spent and a rate change must not rewrite it.
     pub fn from_state_json(v: &Value) -> LocalLedger {
         let mut l = LocalLedger::default();
         let Some(o) = v.as_object() else { return l };
         l.total_tokens = o.get("total_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+        l.total_cost = o.get("total_cost").and_then(|x| x.as_f64()).unwrap_or(0.0);
         if let Some(list) = o.get("samples").and_then(|x| x.as_array()) {
             for item in list {
                 let Some(t) = item.as_array() else { continue };
@@ -239,56 +244,91 @@ impl LocalLedger {
                 if ts <= 0 {
                     continue;
                 }
-                // Three shapes exist on disk:
-                //   [ts, cost, tokens]                        - money + a bare total
-                //   [ts, cost, tokens, prompt, cached, completion] - money + the split
-                //   [ts, prompt, cached, completion]          - the current, tokens-only form
-                // All are read for their token counts, which is all the ledger means now. The money
-                // column is discarded rather than reinterpreted: a rate frozen in an old file
-                // cannot be trusted to price anything today.
-                let (prompt, cached, completion) = if t.len() == 4 {
-                    (
-                        t[1].as_u64().unwrap_or(0),
+                // Shapes on disk, oldest first:
+                //   [ts, cost, tokens]                             - money + a bare total
+                //   [ts, cost, tokens, prompt, cached, completion]  - money + the split
+                //   [ts, prompt, cached, completion]               - tokens only (a detour)
+                //   [ts, cost, prompt, cached, completion]         - the current form
+                // The money column is kept when the file has one: it is what the request actually
+                // cost at the rates then in force, and the allowance is measured in it. A file with
+                // no money column predates that guarantee, so its samples are priced at the current
+                // rates once, at load, rather than left at zero.
+                let (cost, prompt, cached, completion) = match t.len() {
+                    2 => continue,
+                    3 => {
+                        // [ts, cost, tokens]: a bare token total, no split recorded. Priced as
+                        // output, the dearest class, so an unknown split never understates spend.
+                        (t[1].as_f64().unwrap_or(0.0), 0, 0, t[2].as_u64().unwrap_or(0))
+                    }
+                    4 => {
+                        // [ts, prompt, cached, completion]: no money column. NaN marks it for
+                        // `price_unpriced`; a real zero would be indistinguishable from a request
+                        // that genuinely cost nothing.
+                        (
+                            f64::NAN,
+                            t[1].as_u64().unwrap_or(0),
+                            t[2].as_u64().unwrap_or(0),
+                            t[3].as_u64().unwrap_or(0),
+                        )
+                    }
+                    5 => (
+                        t[1].as_f64().unwrap_or(0.0),
                         t[2].as_u64().unwrap_or(0),
                         t[3].as_u64().unwrap_or(0),
-                    )
-                } else if t.len() >= 6 {
-                    let (p, c, o) = (
-                        t[3].as_u64().unwrap_or(0),
                         t[4].as_u64().unwrap_or(0),
-                        t[5].as_u64().unwrap_or(0),
-                    );
-                    // An early version wrote the token total in column 2 and left the split at
-                    // zero. That total is real usage and must not be dropped, or every such request
-                    // silently disappears from the quota the moment rates are applied. Priced as
-                    // output, the dearest class, so an unknown split never understates the spend.
-                    if p == 0 && c == 0 && o == 0 {
-                        (0, 0, t[2].as_u64().unwrap_or(0))
-                    } else {
-                        (p, c, o)
+                    ),
+                    _ => {
+                        let (p, c, o) = (
+                            t[3].as_u64().unwrap_or(0),
+                            t[4].as_u64().unwrap_or(0),
+                            t[5].as_u64().unwrap_or(0),
+                        );
+                        let split = if p == 0 && c == 0 && o == 0 {
+                            (0, 0, t[2].as_u64().unwrap_or(0))
+                        } else {
+                            (p, c, o)
+                        };
+                        (t[1].as_f64().unwrap_or(0.0), split.0, split.1, split.2)
                     }
-                } else if t.len() == 3 {
-                    // Same case in its older, shorter form.
-                    (0, 0, t[2].as_u64().unwrap_or(0))
-                } else {
-                    continue;
                 };
-                l.samples.push_back(LedgerSample { ts, prompt, cached, completion });
+                l.samples.push_back(LedgerSample { ts, cost, prompt, cached, completion });
             }
         }
         l
     }
 
+    /// Price the samples that arrived without a cost, at the rates now in force.
+    ///
+    /// This is a one-time migration for files written before the ledger recorded money. It runs when
+    /// the allowance's rates are known, which is after loading; afterwards every sample carries its
+    /// own cost and this is a no-op.
+    pub fn price_unpriced(&mut self, prices: &crate::config::PricesCfg, peak: bool) {
+        let mut any = false;
+        for s in self.samples.iter_mut() {
+            if s.cost.is_nan() {
+                s.cost = prices.cost_of(s.prompt, s.cached, s.completion, peak);
+                any = true;
+            }
+        }
+        if any {
+            self.total_cost = self.samples.iter().map(|s| s.cost).sum();
+        }
+    }
+
     /// Record one request's token counts. Money is not an input: it is computed from these when
-    /// read, against whatever prices are configured at that moment.
-    pub fn add_usage(&mut self, now: i64, usage: Usage) {
+    /// The cost is computed here, once, at the rates in force now, and stored with the tokens. That
+    /// is what makes a later rate change affect only later requests: the allowance this request
+    /// consumed is already spent and must not be recomputed under new prices.
+    pub fn add_usage(&mut self, now: i64, usage: Usage, cost: f64) {
         self.samples.push_back(LedgerSample {
             ts: now,
+            cost,
             prompt: usage.prompt,
             cached: usage.cached,
             completion: usage.completion,
         });
         self.total_tokens += usage.total();
+        self.total_cost += cost;
         // The in-memory cap and the persisted cap are the same number on purpose. If memory kept
         // more than the file accepts, a long-running process would answer from a longer history
         // than a restarted one and the two would disagree about the same baseline.
@@ -305,31 +345,29 @@ impl LocalLedger {
         }
     }
 
-    /// Tokens of each class recorded at or after `since`, priced at `prices`.
+    /// Allowance consumed at or after `since`, as recorded when each request happened.
     ///
-    /// Every money figure the ledger reports goes through here, so a price correction applies to
-    /// the whole retained history at once - that is the point of storing counts instead of money.
-    pub fn cost_since(&self, since: i64, prices: &crate::config::PricesCfg, peak: bool) -> f64 {
-        let mut prompt = 0u64;
-        let mut cached = 0u64;
-        let mut completion = 0u64;
-        for s in self.samples.iter().rev().take_while(|s| s.ts >= since) {
-            prompt += s.prompt;
-            cached += s.cached;
-            completion += s.completion;
-        }
-        let c = prices.cost_of(prompt, cached, completion, peak);
-        // Summing nothing yields 0.0; the guard exists so a zero never prints as "-0.00".
-        if c == 0.0 {
+    /// No rates are involved: every sample already holds the money it cost. A rate change therefore
+    /// cannot move this figure, which is the property the allowance depends on.
+    pub fn cost_since(&self, since: i64) -> f64 {
+        let sum: f64 = self
+            .samples
+            .iter()
+            .rev()
+            .take_while(|s| s.ts >= since)
+            .map(|s| s.cost)
+            .sum();
+        // Summing nothing yields 0.0; the guard keeps a zero from printing as "-0.00".
+        if sum == 0.0 {
             0.0
         } else {
-            c
+            sum
         }
     }
 
-    /// Cost recorded in the sliding window ending now, priced at `prices`.
-    pub fn window_cost(&self, now: i64, period_secs: i64, prices: &crate::config::PricesCfg, peak: bool) -> f64 {
-        self.cost_since(now - period_secs, prices, peak)
+    /// Allowance consumed in the sliding window ending now.
+    pub fn window_cost(&self, now: i64, period_secs: i64) -> f64 {
+        self.cost_since(now - period_secs)
     }
 
     /// Tokens of each class recorded at or after `since`.
@@ -368,14 +406,14 @@ impl LocalLedger {
         (prompt, cached, completion)
     }
 
-    /// Consumption recorded in the half-open interval [from, to), priced at `prices`.
+    /// Consumption recorded in the half-open interval [from, to).
     ///
     /// Half-open because both ends are reading instants: a request stamped exactly at `from` was
     /// forwarded after that reading was taken (readings happen between requests, never inside one),
     /// while one stamped exactly at `to` belongs to the next window. Summing the two open ends
     /// would double-count a boundary sample.
-    pub fn cost_between(&self, from: i64, to: i64, prices: &crate::config::PricesCfg, peak: bool) -> f64 {
-        self.cost_since(from, prices, peak) - self.cost_since(to, prices, peak)
+    pub fn cost_between(&self, from: i64, to: i64) -> f64 {
+        self.cost_since(from) - self.cost_since(to)
     }
 
     /// Combine several ledgers into one, in time order.
@@ -395,7 +433,8 @@ impl LocalLedger {
             a.ts == b.ts && a.prompt == b.prompt && a.cached == b.cached && a.completion == b.completion
         });
         let total_tokens = all.iter().map(|s| s.total_tokens()).sum();
-        let mut out = LocalLedger { samples: VecDeque::from(all), total_tokens };
+        let total_cost = all.iter().map(|s| s.cost).sum();
+        let mut out = LocalLedger { samples: VecDeque::from(all), total_tokens, total_cost };
         // The merged history can exceed the persistence cap; the same rule as `add_usage` applies.
         while out.samples.len() > PERSISTED_SAMPLES {
             out.samples.pop_front();
@@ -765,9 +804,9 @@ fn view(
 
 impl QuotaState {
     /// Combine the remote usage API with the local ledger into a routing view.
-    /// `prices` and `peak` price the ledger's token counts. They are passed in rather than stored
-    /// because the ledger keeps counts only: a money figure is a function of the rates in force when
-    /// it is read, so a corrected rate fixes the whole retained history at once.
+    ///
+    /// No rates are needed: every ledger sample already records what it cost, so the allowance is a
+    /// plain sum of money and a later rate change cannot move it.
     pub fn report(
         &self,
         now: i64,
@@ -776,8 +815,6 @@ impl QuotaState {
         projection: bool,
         exhaust_at_pct: f64,
         quota: &QuotaCfg,
-        prices: &crate::config::PricesCfg,
-        peak: bool,
     ) -> QuotaReport {
         let stale = self.source != QuotaSource::Remote || now - self.fetched_at > stale_after;
         let use_remote = self.source == QuotaSource::Remote;
@@ -798,7 +835,7 @@ impl QuotaState {
             // Both currencies read the same amount: the unit is a label, never a conversion.
             // Listed explicitly rather than behind a guard, because a guard does not make a
             // match exhaustive and adding a currency would then fail to compile elsewhere.
-            QuotaUnit::Usd | QuotaUnit::Rmb => self.ledger.cost_since(from, prices, peak),
+            QuotaUnit::Usd | QuotaUnit::Rmb => self.ledger.cost_since(from),
             QuotaUnit::Tokens => self.ledger.tokens_since(from) as f64,
             QuotaUnit::None => 0.0,
         };
@@ -890,8 +927,6 @@ impl QuotaState {
         report: &QuotaReport,
         currency: &str,
         _stats: &AccountStats,
-        prices: &crate::config::PricesCfg,
-        peak: bool,
     ) -> Value {
         let w = |v: &QuotaView| {
             json!({
@@ -931,14 +966,14 @@ impl QuotaState {
             let start = reset - window;
             let ref_inside = ref_pct > 0.0 && ref_at > 0 && ref_at >= start && ref_at < reset;
             let used = if ref_inside {
-                total * ref_pct / 100.0 + self.ledger.cost_since(ref_at, prices, peak)
+                total * ref_pct / 100.0 + self.ledger.cost_since(ref_at)
             } else {
                 // No reference in this bucket: fall back to the bucket sum, which is only honest
                 // when the ledger reaches the bucket's start.
                 if self.ledger.samples.front().map(|s| s.ts).is_some_and(|first| first > start) {
                     return None;
                 }
-                self.ledger.cost_since(start, prices, peak)
+                self.ledger.cost_since(start)
             };
             let pct = (used / total * 100.0).clamp(0.0, 999.0);
             Some(json!({
@@ -982,12 +1017,12 @@ impl QuotaState {
             // resets, so the amount and the percentage would disagree at exactly the moment the
             // operator looks: the percentage would read 0% beside the whole of last month's spend.
             "local_ledger": {
-                "total": (self.ledger.cost_since(0, prices, peak) * 1e6).round() / 1e6,
-                "rolling": (self.ledger.window_cost(now, PERIOD_ROLLING, prices, peak) * 1e6).round() / 1e6,
-                "weekly": (self.ledger.window_cost(now, PERIOD_WEEKLY, prices, peak) * 1e6).round() / 1e6,
+                "total": (self.ledger.cost_since(0) * 1e6).round() / 1e6,
+                "rolling": (self.ledger.window_cost(now, PERIOD_ROLLING) * 1e6).round() / 1e6,
+                "weekly": (self.ledger.window_cost(now, PERIOD_WEEKLY) * 1e6).round() / 1e6,
                 "monthly": (self
                     .ledger
-                    .cost_since(report.cycle_start.unwrap_or(now - PERIOD_MONTHLY), prices, peak)
+                    .cost_since(report.cycle_start.unwrap_or(now - PERIOD_MONTHLY))
                     * 1e6)
                     .round()
                     / 1e6,
@@ -1011,7 +1046,7 @@ impl QuotaState {
                         "pct_week": r.pct_week,
                         "pct_month": r.pct_month,
                         "accumulated": {
-                            "cost": (self.ledger.cost_since(r.at, prices, peak) * 1e6).round() / 1e6,
+                            "cost": (self.ledger.cost_since(r.at) * 1e6).round() / 1e6,
                             "prompt": prompt,
                             "cached": cached,
                             "completion": completion,
@@ -1212,10 +1247,8 @@ impl AccountRuntime {
         now: i64,
         cfg: &crate::config::Config,
         quota: &QuotaCfg,
-        prices: &crate::config::PricesCfg,
     ) -> QuotaReport {
         let stale_after = (quota.refresh_secs as i64).max(cfg.router.quota_refresh_secs as i64) * 5;
-        let peak = cfg.is_peak(now);
         let blank = QuotaView {
             pct: 0.0,
             projected_pct: 0.0,
@@ -1232,8 +1265,6 @@ impl AccountRuntime {
                 cfg.router.surplus_projection,
                 cfg.router.exhaust_at_pct,
                 quota,
-                prices,
-                peak,
             ),
             Err(_) => QuotaReport {
                 source: QuotaSource::Unknown,
@@ -1271,8 +1302,8 @@ impl AccountRuntime {
         let tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
         if tokens > 0 {
             if let Ok(mut q) = self.quota.lock() {
-                // Only the counts go in. What they are worth is decided when the ledger is read, so
-                // a price correction applies to this request too, however long ago it happened.
+                // The cost is frozen here, at the rates in force for this request. A later rate
+                // change must not retroactively alter an allowance that has already been spent.
                 q.ledger.add_usage(
                     now,
                     Usage {
@@ -1280,6 +1311,7 @@ impl AccountRuntime {
                         cached: usage.cached_tokens,
                         completion: usage.completion_tokens,
                     },
+                    usage.cost_usd,
                 );
             }
         }
@@ -1296,12 +1328,12 @@ impl AccountRuntime {
         }
     }
 
-    pub fn to_json(&self, now: i64, cfg: &AccountCfg, report: &QuotaReport, peak: bool) -> Value {
+    pub fn to_json(&self, now: i64, cfg: &AccountCfg, report: &QuotaReport) -> Value {
         let s = self.stats.lock().map(|x| x.clone()).unwrap_or_default();
         let quota = self
             .quota
             .lock()
-            .map(|q| q.to_json(now, report, cfg.prices.currency.as_str(), &s, &cfg.prices, peak))
+            .map(|q| q.to_json(now, report, cfg.prices.currency.as_str(), &s))
             .unwrap_or(Value::Null);
         let balance = self.balance.lock().ok().and_then(|b| {
             b.as_ref().map(|v| {
@@ -1486,7 +1518,14 @@ impl Registry {
 
     /// Re-attach persisted ledgers at startup, so the quota view and the statistics cover the same
     /// period instead of one being since-restart.
-    pub fn restore_ledgers(&self, ledgers: &HashMap<String, LocalLedger>) {
+    ///
+    /// `prices_of` supplies the rates for an endpoint by name. They are needed only for samples in
+    /// files written before the ledger recorded money: those are priced once here. A sample that
+    /// already carries its own cost is never touched, because that money was really spent.
+    pub fn restore_ledgers<F>(&self, ledgers: &HashMap<String, LocalLedger>, prices_of: F, peak: bool)
+    where
+        F: Fn(&str) -> crate::config::PricesCfg,
+    {
         if ledgers.is_empty() {
             return;
         }
@@ -1498,7 +1537,8 @@ impl Registry {
         // endpoint, and each holds only that model's share of the plan; the shares must be merged
         // rather than one of them winning, or grouping would discard real consumption. Records are
         // merged by timestamp so a sample is never counted twice.
-        let mut by_cell: HashMap<usize, (Arc<Mutex<QuotaState>>, Vec<LocalLedger>)> = HashMap::new();
+        let mut by_cell: HashMap<usize, (Arc<Mutex<QuotaState>>, Vec<LocalLedger>, crate::config::PricesCfg, bool)> =
+            HashMap::new();
         for rt in m.values() {
             let key = Registry::quota_key(rt);
             let mut parts: Vec<LocalLedger> = Vec::new();
@@ -1516,11 +1556,15 @@ impl Registry {
                 continue;
             }
             let id = Arc::as_ptr(&rt.quota) as usize;
-            by_cell.entry(id).or_insert_with(|| (rt.quota.clone(), Vec::new())).1.extend(parts);
+            let rates = prices_of(&rt.name);
+            let entry = by_cell.entry(id).or_insert_with(|| (rt.quota.clone(), Vec::new(), rates, peak));
+            entry.1.extend(parts);
         }
         let mut restored = 0usize;
-        for (_, (cell, parts)) in by_cell {
-            let merged = LocalLedger::merge(parts);
+        for (_, (cell, parts, rates, peak)) in by_cell {
+            let mut merged = LocalLedger::merge(parts);
+            // A one-time migration for pre-money files: price whatever arrived without a cost.
+            merged.price_unpriced(&rates, peak);
             let mut q = match cell.lock() {
                 Ok(q) => q,
                 Err(p) => p.into_inner(),

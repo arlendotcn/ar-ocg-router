@@ -309,7 +309,22 @@ fn main() {
         state.registry.restore_calibrations(&saved.calibrations);
         state.router.health.restore(saved.health);
         state.registry.restore_stats(&saved.stats);
-        state.registry.restore_ledgers(&saved.ledgers);
+        // Rates are needed only for samples from files written before the ledger recorded money;
+        // those get priced once, here, and carry their cost from then on.
+        let peak = cfg.is_peak(crate::util::now_secs());
+        let rates = cfg.clone();
+        state.registry.restore_ledgers(
+            &saved.ledgers,
+            |name| {
+                rates
+                    .accounts
+                    .iter()
+                    .find(|a| a.name == name)
+                    .map(|a| a.prices.clone())
+                    .unwrap_or_default()
+            },
+            peak,
+        );
         // write once at startup so the file exists (and is known-good) even before any failure
         persist::write(&state);
     }
@@ -548,7 +563,7 @@ fn print_plan(state: &Arc<proxy::AppState>) {
         println!();
         println!("accounts:");
         for acc in accounts.iter() {
-            let report = acc.rt.quota_report(now, &cfg, &acc.cfg.quota, &acc.cfg.prices);
+            let report = acc.rt.quota_report(now, &cfg, &acc.cfg.quota);
             println!(
                 "  [{}] {:<18} rules={} quota={} exhausted={} surplus={} cooldown={}s",
                 acc.cfg.kind.as_str(),
@@ -879,7 +894,7 @@ fn run_selftest(state: &Arc<proxy::AppState>) {
         // ---- quota / balance
         if acc.cfg.quota.probe == crate::config::QuotaProbe::Usage {
             let status = quota::refresh_usage(&agent, &acc.cfg, &acc.rt, now, &ua);
-            let report = acc.rt.quota_report(now, &cfg, &acc.cfg.quota, &acc.cfg.prices);
+            let report = acc.rt.quota_report(now, &cfg, &acc.cfg.quota);
             println!(
                 "    /usage   : {} | rolling {:.0}% weekly {:.0}% monthly {:.0}% | source={} exhausted={} surplus={}",
                 status,

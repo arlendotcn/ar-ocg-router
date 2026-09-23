@@ -2201,8 +2201,9 @@ fn statistics_survive_a_restart_until_they_are_reset() {
     // statistics, which already live here, so keeping it in memory only meant the dashboard and the
     // quota decision described different periods (one lifetime, one since-restart).
     //
-    // It stores token counts, not money: the rates that turn them into money are configuration, and
-    // correcting a rate has to correct the history it priced.
+    // Each sample holds the money the request cost at the rates in force when it happened, plus the
+    // token counts. The money is what the allowance is measured in and is frozen: changing a rate
+    // later must not rewrite what was already spent.
     // Keyed by allowance, not by endpoint name: endpoints sharing a provider credential are two
     // models on one plan and share one record. This endpoint is alone in its plan, so the key is
     // still derived from the credential it authenticates with.
@@ -2216,14 +2217,15 @@ fn statistics_survive_a_restart_until_they_are_reset() {
         text
     );
     let sample = &ledger["samples"][0];
+    let fields = sample.as_array().expect("a sample is an array");
+    assert_eq!(fields.len(), 5, "a sample is [ts, cost, prompt, cached, completion]: {sample}");
     assert!(
-        sample.as_array().is_some_and(|a| a.len() == 4),
-        "a sample is [ts, prompt, cached, completion]: {}",
-        sample
+        fields[1].as_f64().unwrap_or(0.0) > 0.0,
+        "the sample records what the request cost: {sample}"
     );
     assert!(
-        ledger.get("total_cost").is_none(),
-        "money must not be stored in the ledger: {}",
+        ledger["total_cost"].as_f64().unwrap_or(0.0) > 0.0,
+        "the ledger carries a money total: {}",
         text
     );
 

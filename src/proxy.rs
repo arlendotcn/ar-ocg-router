@@ -307,8 +307,8 @@ fn stats_json(state: &Arc<AppState>) -> Value {
     let sched = timeutil::eval_schedule(now, &cfg.router.peak_windows);
     let mut acc_json = Vec::new();
     for acc in accounts.iter() {
-        let report = acc.rt.quota_report(now, &cfg, &acc.cfg.quota, &acc.cfg.prices);
-        let mut v = acc.rt.to_json(now, &acc.cfg, &report, cfg.is_peak(now));
+        let report = acc.rt.quota_report(now, &cfg, &acc.cfg.quota);
+        let mut v = acc.rt.to_json(now, &acc.cfg, &report);
         let health = state.router.health.get(acc.name());
         if let Some(obj) = v.as_object_mut() {
             obj.insert(
