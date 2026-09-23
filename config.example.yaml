@@ -99,7 +99,10 @@ plans:
     # 优先用上游自己返回的 cost；上游不给（DeepSeek 官方、方舟都不给）才用这里的数字。
     # 币种只是标签，路由器**不做任何汇率换算**：两家的定价不是汇率关系。
     # 各模型的参考价见 docs/configuration-zh.md 里的对照表。
-    # prices: { currency: USD, input: 0.15, output: 0.60, cached_input: 0.003, peak_multiplier: 2 }
+    # peak_multiplier 只在忙时生效；promo_multiplier 是整体系数，同时作用于三项单价，
+    # 用于促销或套餐整体调整。两者都默认 1（不填、为 0 或负数都按 1 处理）。
+    # 改动任何单价都只影响**之后**的请求：已发生的消耗按当时单价记入账本并冻结。
+    # prices: { currency: USD, input: 0.15, output: 0.60, cached_input: 0.003, peak_multiplier: 2, promo_multiplier: 1 }
 
   # ---- 阿里百炼 Token Plan / DeepSeek V4.1 Flash ----
   - name: bailian-dsf
