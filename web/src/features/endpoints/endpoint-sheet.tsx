@@ -19,6 +19,7 @@ export function EndpointSheet({
   open,
   endpoint,
   library,
+  peakWindows,
   onClose,
   onCommit,
   onTest,
@@ -27,6 +28,8 @@ export function EndpointSheet({
   endpoint: EndpointCfg | null;
   /** Model reference specs, used to annotate whatever id is chosen. */
   library: ModelEntry[];
+  /** The peak window as the router has it configured, named in the peak multiplier help. */
+  peakWindows?: string;
   onClose: () => void;
   onCommit: (e: EndpointCfg) => void;
   /** Probes the endpoint as the form currently has it, without saving. */
@@ -300,7 +303,10 @@ export function EndpointSheet({
               {/* The two factors scale all three rates, so they pair up as one row of plan knobs -
                   the same shape the rates they act on take in the column beside them. */}
               <div className="grid grid-cols-2 gap-3">
-                <Field label={t.endpoints.pricePeak}>
+                <Field
+                  label={t.endpoints.pricePeak}
+                  help={t.endpoints.pricePeakHint.replace("{schedule}", peakWindows || "—")}
+                >
                   <Input
                     type="number"
                     step="any"
