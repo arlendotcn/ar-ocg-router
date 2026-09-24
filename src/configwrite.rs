@@ -230,6 +230,8 @@ fn router_yaml(r: &RouterCfg) -> Y {
         ("auth_cooldown_secs", yu64(r.auth_cooldown_secs)),
         ("server_error_cooldown_secs", yu64(r.server_error_cooldown_secs)),
         ("retry_on_model_error", ybool(r.retry_on_model_error)),
+        ("rate_limit_retries", Y::Number(serde_yaml::Number::from(r.rate_limit_retries as u64))),
+        ("rate_retry_delay_ms", yu64(r.rate_retry_delay_ms)),
         ("skip_after_failures", Y::Number(serde_yaml::Number::from(r.skip_after_failures as u64))),
         ("skip_secs", yu64(r.skip_secs)),
         ("attempt_budget_secs", yu64(r.attempt_budget_secs)),
@@ -643,6 +645,8 @@ fallback:
             original.router.server_error_cooldown_secs
         );
         assert_eq!(reparsed.router.retry_on_model_error, original.router.retry_on_model_error);
+        assert_eq!(reparsed.router.rate_limit_retries, original.router.rate_limit_retries);
+        assert_eq!(reparsed.router.rate_retry_delay_ms, original.router.rate_retry_delay_ms);
         assert_eq!(reparsed.router.skip_after_failures, original.router.skip_after_failures);
         assert_eq!(reparsed.router.skip_secs, original.router.skip_secs);
         assert_eq!(reparsed.router.attempt_budget_secs, original.router.attempt_budget_secs);

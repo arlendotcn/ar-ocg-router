@@ -309,6 +309,8 @@ fn router_json(cfg: &Config) -> Value {
         "auth_cooldown_secs": r.auth_cooldown_secs,
         "server_error_cooldown_secs": r.server_error_cooldown_secs,
         "retry_on_model_error": r.retry_on_model_error,
+        "rate_limit_retries": r.rate_limit_retries,
+        "rate_retry_delay_ms": r.rate_retry_delay_ms,
         "skip_after_failures": r.skip_after_failures,
         "skip_secs": r.skip_secs,
         "attempt_budget_secs": r.attempt_budget_secs,
@@ -402,6 +404,8 @@ fn doc_to_yaml(doc: &Value, existing: &Config) -> Result<String, String> {
     out.push_str(&format!("  auth_cooldown_secs: {}\n", int_at(router, "auth_cooldown_secs").unwrap_or(600)));
     out.push_str(&format!("  server_error_cooldown_secs: {}\n", int_at(router, "server_error_cooldown_secs").unwrap_or(20)));
     out.push_str(&format!("  retry_on_model_error: {}\n", bool_at(router, "retry_on_model_error").unwrap_or(true)));
+    out.push_str(&format!("  rate_limit_retries: {}\n", int_at(router, "rate_limit_retries").unwrap_or(1)));
+    out.push_str(&format!("  rate_retry_delay_ms: {}\n", int_at(router, "rate_retry_delay_ms").unwrap_or(700)));
     out.push_str(&format!("  skip_after_failures: {}\n", int_at(router, "skip_after_failures").unwrap_or(3)));
     out.push_str(&format!("  skip_secs: {}\n", int_at(router, "skip_secs").unwrap_or(300)));
     out.push_str(&format!("  attempt_budget_secs: {}\n", int_at(router, "attempt_budget_secs").unwrap_or(120)));

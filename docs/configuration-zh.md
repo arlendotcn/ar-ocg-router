@@ -260,6 +260,7 @@ DeepSeek 的高峰时段是北京时间周一至周五 09:00–12:00、14:00–1
 | `skip_after_failures` / `skip_secs` | 3 / 300 | 连续失败 N 次后整段跳过该端点，跳过时长为后者。 |
 | `attempt_budget_secs` | 120 | 端点间重试的总时间预算。 |
 | `cooldown_secs` / `auth_cooldown_secs` / `server_error_cooldown_secs` | 30 / 600 / 20 | 429 / 401-403 / 5xx 后的冷却时长。 |
+| `rate_limit_retries` / `rate_retry_delay_ms` | 1 / 700 | 「限速类」429（不是额度耗尽那种）在**同一个端点**重试几次、每次先等多久。上游这句话的意思是「等一下再试」；直接换端点会把同一段会话交给别家，而别家可能拒收第一家愿意接的内容。填 `0` 恢复旧行为（第一次 429 就换）。 |
 | `retry_on_model_error` | true | 把「模型不存在」也当作切换信号。各家的模型 id 不同，这一步很关键。 |
 | `inject_stream_usage` | false | 给流式 chat 请求加 `stream_options.include_usage`。 |
 | `quota_refresh_secs` | 60 | 后台额度轮询间隔（端点自己的配置优先）。 |
@@ -288,3 +289,4 @@ DeepSeek 的高峰时段是北京时间周一至周五 09:00–12:00、14:00–1
 | `server.max_body_bytes` | 64 MiB | 超出返回 413。 |
 | `log.level` | `info` | `error` < `warn` < `info` < `debug` < `trace`。排查选路问题时用 `debug`。 |
 | `log.file` | 无 | 同时写文件。相对路径解析到二进制所在目录——服务启动时的工作目录是 SCM 目录。 |
+| `log.dump_error_request`（别名 `dump_request_on_4xx`） | false | 上游返回 4xx 时，把**实际发出去的那份请求**以脱敏「形状」记进日志：字段名、取值类型、数字原样；对 `input` / `messages` 还会给出条目统计与最后八条的摘要（`reasoning(text,summary,encrypted)`、`message(role)` 等）。提示词文本永远不会出现。查「上游为什么拒了这段会话」时，不用再猜某个 reasoning 条目到底有没有带上游要的文本。 |

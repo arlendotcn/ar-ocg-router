@@ -63,6 +63,9 @@ struct MockState {
     port: u16,
     requests: Mutex<Vec<Recorded>>,
     routes: Mutex<HashMap<String, MockResponse>>,
+    /// Answers served before the route above applies, one per request: the shape of a transient
+    /// refusal that clears on its own.
+    scripted: Mutex<HashMap<String, Vec<MockResponse>>>,
     quota_pct: Mutex<f64>,
 }
 
@@ -79,6 +82,7 @@ impl Mock {
             port,
             requests: Mutex::new(Vec::new()),
             routes: Mutex::new(HashMap::new()),
+            scripted: Mutex::new(HashMap::new()),
             quota_pct: Mutex::new(10.0),
         });
         let state = inner.clone();
@@ -99,6 +103,16 @@ impl Mock {
 
     fn set(&self, path: &str, resp: MockResponse) {
         self.inner.routes.lock().unwrap().insert(path.to_string(), resp);
+    }
+
+    /// Serve `first` for the next `times` requests on this path, then fall through to whatever the
+    /// route (or the default) says. A transient rate limit that clears is exactly this shape.
+    fn set_then(&self, path: &str, first: MockResponse, times: usize) {
+        let mut queue = Vec::new();
+        for _ in 0..times {
+            queue.push(first.clone());
+        }
+        self.inner.scripted.lock().unwrap().insert(path.to_string(), queue);
     }
 
     fn set_quota_pct(&self, pct: f64) {
@@ -184,10 +198,21 @@ fn handle_conn(stream: TcpStream, state: Arc<MockState>) {
             body: String::from_utf8_lossy(&body).to_string(),
         });
 
+        // A scripted answer wins while it lasts; after that the route (or the default) applies.
+        let scripted = {
+            let mut q = state.scripted.lock().unwrap();
+            match q.get_mut(&path) {
+                Some(list) if !list.is_empty() => Some(list.remove(0)),
+                _ => None,
+            }
+        };
         let route = state.routes.lock().unwrap().get(&path).cloned();
-        let resp = match route {
+        let resp = match scripted {
             Some(r) => r,
-            None => default_route(&path, &state),
+            None => match route {
+                Some(r) => r,
+                None => default_route(&path, &state),
+            },
         };
         if let Some(chunks) = &resp.chunks {
             let head = format!(
@@ -2630,3 +2655,48 @@ fn the_editor_self_test_probes_the_draft_without_saving() {
         "the saved endpoint was damaged by the draft probe"
     );
 }
+
+/// A transient rate limit is retried on the *same* endpoint rather than handing the request to
+/// another provider: "requests are too frequent, wait a short moment" is an instruction, and a
+/// conversation that moves between providers loses whatever the first one put in it.
+#[test]
+fn a_transient_rate_limit_retries_the_same_endpoint() {
+    let go = Mock::start();
+    let fb = Mock::start();
+    go.set_then(
+        "/v1/chat/completions",
+        MockResponse::json(
+            429,
+            r#"{"error":{"message":"Requests are too frequent. Please reduce your request frequency, wait a short moment, and retry your request.","type":"rate_limit_error"}}"#,
+        ),
+        1,
+    );
+    let r = start_router("ratelimit", "2026-09-16T02:00:00Z", &|port| {
+        config_peak_offpeak(port, &format!("{}/v1", go.url()), &fb.url(), "opencodego", 80)
+    });
+    let resp = request(r.port, "POST", "/v1/chat/completions", Some(CHAT_BODY), &[]);
+    if resp.status != 200 {
+        dump_log(&r);
+    }
+    assert_eq!(resp.status, 200, "the retry should have served it");
+    assert_eq!(
+        resp.header("x-router-account"),
+        Some("go-1"),
+        "the same endpoint must serve the retry"
+    );
+    assert_eq!(go.hits("/v1/chat/completions"), 2, "the 429 and the retry");
+    assert_eq!(fb.hits("/v1/chat/completions"), 0, "a rate limit is not a reason to fail over");
+
+    // And it is not held against the endpoint: a rate limit that cleared is not a broken endpoint.
+    let stats = request(r.port, "GET", "/router/stats", None, &[]);
+    let v = stats.json();
+    let go_acc = v["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "go-1")
+        .unwrap()
+        .clone();
+    assert_eq!(go_acc["available"], true, "go-1 should not be cooling down: {}", go_acc);
+}
+

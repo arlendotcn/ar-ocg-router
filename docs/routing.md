@@ -36,7 +36,8 @@ spending it now costs nothing that would have been used later. Two tests apply:
 | Upstream response | Action |
 | --- | --- |
 | 401 / 403 | Cool the endpoint for `auth_cooldown_secs`, try the next |
-| 429, or a quota-shaped error | Cool it, and mark plan quota exhausted, try the next |
+| A transient rate limit (429 that is not a quota shape) | Wait `rate_retry_delay_ms` and re-send to the **same** endpoint, up to `rate_limit_retries` times; only then try the next |
+| 429 that reads as an exhausted allowance, or a quota-shaped error | Cool it, and mark plan quota exhausted, try the next |
 | 400 / 404 / 422 whose message looks like a model problem | Try the next (`retry_on_model_error`) |
 | 400 / 404 / 422 for anything else | Return to the client unchanged - a parameter error must not be masked |
 | 5xx, timeout, connection failure | Short cooldown, try the next |

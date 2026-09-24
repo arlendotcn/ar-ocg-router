@@ -251,6 +251,9 @@ export type RouterCfg = {
   auth_cooldown_secs: number;
   server_error_cooldown_secs: number;
   retry_on_model_error: boolean;
+  /** Transient rate-limit 429s retried on the same endpoint before failing over. */
+  rate_limit_retries: number;
+  rate_retry_delay_ms: number;
   skip_after_failures: number;
   skip_secs: number;
   attempt_budget_secs: number;

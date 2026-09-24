@@ -300,6 +300,7 @@ change often and does not report a cost per request, so fill those in from your 
 | `skip_after_failures` / `skip_secs` | 3 / 300 | Skip an endpoint entirely after N consecutive failures, for this long. |
 | `attempt_budget_secs` | 120 | Total time allowed for hopping between endpoints. |
 | `cooldown_secs` / `auth_cooldown_secs` / `server_error_cooldown_secs` | 30 / 600 / 20 | Rest after 429 / 401-403 / 5xx. |
+| `rate_limit_retries` / `rate_retry_delay_ms` | 1 / 700 | How many times a *transient* rate limit (a 429 that is not a quota exhaustion) is retried on the **same** endpoint, and how long to wait first. That answer reads "requests are too frequent, wait a short moment", and hopping providers instead hands the conversation to another one, which may refuse what the first was willing to take. `0` restores failover on the first 429. |
 | `retry_on_model_error` | true | Treat "model not found" as a failover trigger. Model ids differ between providers, so this matters. |
 | `inject_stream_usage` | false | Add `stream_options.include_usage` to streaming chat requests. |
 | `quota_refresh_secs` | 60 | Background quota poll interval (an endpoint's own value overrides it). |
@@ -330,3 +331,4 @@ so new parameters are never silently swallowed.
 | `server.max_body_bytes` | 64 MiB | Larger bodies get 413. |
 | `log.level` | `info` | `error` < `warn` < `info` < `debug` < `trace`. Use `debug` when diagnosing routing. |
 | `log.file` | none | Also append to a file. Relative paths resolve next to the binary, because a service starts with the SCM working directory. |
+| `log.dump_error_request` (alias `dump_request_on_4xx`) | false | When an upstream answers 4xx, log a **redacted shape** of the request that was sent: field names, value kinds, numbers verbatim, and - for `input` / `messages` - a tally of the items plus the last eight of them (`reasoning(text,summary,encrypted)`, `message(role)`, ...). No prompt text ever appears. This is how "the upstream rejected the conversation" is answered without guessing whether a reasoning item carried the text the upstream demands. |

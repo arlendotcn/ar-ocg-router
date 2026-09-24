@@ -494,6 +494,18 @@ pub struct RouterCfg {
     pub auth_cooldown_secs: u64,
     pub server_error_cooldown_secs: u64,
     pub retry_on_model_error: bool,
+    /// How many times a *transient* rate limit (HTTP 429 that is not a quota exhaustion) is retried
+    /// on the **same** endpoint before the request is handed to another one.
+    ///
+    /// Upstreams that answer "requests are too frequent, wait a moment" mean exactly that, and
+    /// hopping to a different provider instead costs more than it saves: a provider-scoped
+    /// conversation (thinking-mode reasoning items, prompt caches, server-side response state) is
+    /// not portable, and the second provider may simply refuse what the first one was willing to
+    /// take. Zero restores failover-on-first-429.
+    pub rate_limit_retries: u32,
+    /// How long to wait before that retry. Short on purpose: the upstream asked for "a short
+    /// moment", and the whole chain is still bounded by attempt_budget_secs.
+    pub rate_retry_delay_ms: u64,
     /// After this many consecutive "this endpoint cannot serve it" failures the endpoint is
     /// skipped entirely for skip_secs (on top of the normal cooldown).
     pub skip_after_failures: u32,
@@ -531,6 +543,8 @@ impl Default for RouterCfg {
             auth_cooldown_secs: 600,
             server_error_cooldown_secs: 20,
             retry_on_model_error: true,
+            rate_limit_retries: 1,
+            rate_retry_delay_ms: 700,
             skip_after_failures: 3,
             skip_secs: 300,
             attempt_budget_secs: 120,
@@ -967,6 +981,13 @@ pub fn parse(raw: &str, path: &Path) -> Result<Config, String> {
         }
         if let Some(v) = yget_any(m, &["retry_on_model_error"]) {
             router.retry_on_model_error = ybool(v, router.retry_on_model_error);
+        }
+        if let Some(v) = yget_any(m, &["rate_limit_retries"]) {
+            router.rate_limit_retries = yint(v, router.rate_limit_retries as i64).clamp(0, 5) as u32;
+        }
+        if let Some(v) = yget_any(m, &["rate_retry_delay_ms"]) {
+            router.rate_retry_delay_ms =
+                yint(v, router.rate_retry_delay_ms as i64).clamp(0, 10_000) as u64;
         }
         if let Some(v) = yget_any(m, &["session_affinity", "sticky_session"]) {
             router.session_affinity = ybool(v, router.session_affinity);

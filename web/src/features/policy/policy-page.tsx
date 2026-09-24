@@ -283,6 +283,23 @@ export function PolicyPage() {
             onChange={(v) => set("server_error_cooldown_secs", v)}
           />
           <NumberField
+            label={t.policy.rateLimitRetries}
+            help={t.policy.rateLimitRetriesHint}
+            value={r.rate_limit_retries}
+            min={0}
+            max={5}
+            onChange={(v) => set("rate_limit_retries", v)}
+          />
+          <NumberField
+            label={t.policy.rateRetryDelay}
+            help={t.policy.rateRetryDelayHint}
+            value={r.rate_retry_delay_ms}
+            min={0}
+            max={10000}
+            unit={t.common.millis}
+            onChange={(v) => set("rate_retry_delay_ms", v)}
+          />
+          <NumberField
             label={t.policy.skipAfterFailures}
             help={t.policy.skipAfterFailuresHint}
             value={r.skip_after_failures}

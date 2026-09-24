@@ -564,6 +564,27 @@ fn looks_like_quota_error(status: u16, body: &Value) -> bool {
     .any(|k| msg.contains(k))
 }
 
+/// A rate limit the upstream expects to clear on its own, as opposed to an allowance that is spent.
+///
+/// The distinction decides whether waiting is worth anything: a spent allowance will not recover in
+/// the next second, while "requests are too frequent, wait a short moment" is an instruction.
+fn is_transient_rate_limit(status: u16, body: &Value) -> bool {
+    status == 429 && !looks_like_quota_error(status, body)
+}
+
+/// Wait out a transient rate limit before re-sending to the same endpoint.
+///
+/// Returns false when the wait would overrun the chain's wall-clock budget, in which case the
+/// caller moves on rather than sleeping past a deadline it is supposed to respect.
+fn wait_before_rate_retry(cfg: &Config, chain_started: Instant, budget: std::time::Duration) -> bool {
+    let delay = std::time::Duration::from_millis(cfg.router.rate_retry_delay_ms);
+    if chain_started.elapsed() + delay >= budget {
+        return false;
+    }
+    std::thread::sleep(delay);
+    true
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verdict {
     Retry,
@@ -789,46 +810,51 @@ fn proxy(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
             (None, _) => req.body.clone(),
         };
 
-        let mut call = state
-            .agent
-            .post(&url)
-            .set("Content-Type", "application/json")
-            .set(
-                "Accept",
-                if streaming {
-                    "text/event-stream"
-                } else {
-                    "application/json"
-                },
-            )
-            .set("User-Agent", &cfg.router.user_agent)
-            .set("Authorization", &format!("Bearer {}", acc.cfg.key));
-        if mode == Mode::Anthropic {
-            call = call
-                .set("x-api-key", &acc.cfg.key)
-                .set("anthropic-version", "2023-06-01");
-        }
-        if acc.cfg.inject_session {
-            call = call.set("x-opencode-session", &sid);
-        }
         // Protocol headers go through verbatim; the router never rewrites their values.
         let client_headers: Vec<&str> = crate::config::PROTOCOL_HEADERS
             .iter()
             .copied()
             .chain(cfg.compat.forward_headers.iter().map(|s| s.as_str()))
             .collect();
-        for h in client_headers {
-            if let Some(v) = req.header(h) {
-                // never let a client override the endpoint credentials
-                if h.eq_ignore_ascii_case("authorization") {
-                    continue;
-                }
-                call = call.set(h, v);
+        // Built per attempt rather than once: sending consumes a ureq request, and a rate-limited
+        // attempt is sent again from scratch.
+        let build_call = || {
+            let mut call = state
+                .agent
+                .post(&url)
+                .set("Content-Type", "application/json")
+                .set(
+                    "Accept",
+                    if streaming {
+                        "text/event-stream"
+                    } else {
+                        "application/json"
+                    },
+                )
+                .set("User-Agent", &cfg.router.user_agent)
+                .set("Authorization", &format!("Bearer {}", acc.cfg.key));
+            if mode == Mode::Anthropic {
+                call = call
+                    .set("x-api-key", &acc.cfg.key)
+                    .set("anthropic-version", "2023-06-01");
             }
-        }
-        for (k, v) in &acc.cfg.extra_headers {
-            call = call.set(k, v);
-        }
+            if acc.cfg.inject_session {
+                call = call.set("x-opencode-session", &sid);
+            }
+            for h in &client_headers {
+                if let Some(v) = req.header(h) {
+                    // never let a client override the endpoint credentials
+                    if h.eq_ignore_ascii_case("authorization") {
+                        continue;
+                    }
+                    call = call.set(h, v);
+                }
+            }
+            for (k, v) in &acc.cfg.extra_headers {
+                call = call.set(k, v);
+            }
+            call
+        };
 
         // From here to the end of the attempt the endpoint is in use - including the whole stream,
         // which is exactly the window the completion-time statistics cannot see. The guard is the
@@ -846,7 +872,12 @@ fn proxy(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
             endpoint_mode_name(endpoint)
         );
 
-        let response = call.send_bytes(&body_bytes);
+        // A transient rate limit is retried here, on the endpoint that asked for the wait, before the
+        // request is handed to another provider: see `rate_limit_retries`. Everything else leaves this
+        // loop the way it always did - the candidate loop below decides what happens next.
+        let mut rate_retries = 0u32;
+        loop {
+        let response = build_call().send_bytes(&body_bytes);
         let latency_ms = started.elapsed().as_millis() as u64;
 
         match response {
@@ -881,7 +912,9 @@ fn proxy(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
                 let status = resp.status();
                 let text = read_capped(resp, 1 << 20);
                 let parsed: Value = serde_json::from_slice(&text).unwrap_or(Value::Null);
-                if handle_upstream_error(
+                let same = rate_retries < cfg.router.rate_limit_retries
+                    && is_transient_rate_limit(status, &parsed);
+                match handle_upstream_error(
                     state,
                     req,
                     out,
@@ -894,15 +927,25 @@ fn proxy(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
                     &mut attempts,
                     &req_id,
                     sent_json.as_ref(),
-                ) == ErrorAction::Return
-                {
-                    return;
+                    same,
+                ) {
+                    ErrorAction::Return => return,
+                    ErrorAction::RetrySame => {
+                        rate_retries += 1;
+                        if !wait_before_rate_retry(&cfg, started_chain, budget) {
+                            break;
+                        }
+                        continue;
+                    }
+                    ErrorAction::Retry => break,
                 }
             }
             Err(ureq::Error::Status(status, resp)) => {
                 let text = read_capped(resp, 1 << 20);
                 let parsed: Value = serde_json::from_slice(&text).unwrap_or(Value::Null);
-                if handle_upstream_error(
+                let same = rate_retries < cfg.router.rate_limit_retries
+                    && is_transient_rate_limit(status, &parsed);
+                match handle_upstream_error(
                     state,
                     req,
                     out,
@@ -915,9 +958,17 @@ fn proxy(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
                     &mut attempts,
                     &req_id,
                     sent_json.as_ref(),
-                ) == ErrorAction::Return
-                {
-                    return;
+                    same,
+                ) {
+                    ErrorAction::Return => return,
+                    ErrorAction::RetrySame => {
+                        rate_retries += 1;
+                        if !wait_before_rate_retry(&cfg, started_chain, budget) {
+                            break;
+                        }
+                        continue;
+                    }
+                    ErrorAction::Retry => break,
                 }
             }
             Err(e) => {
@@ -948,7 +999,9 @@ fn proxy(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
                     error: util::truncate(&msg, 200),
                 });
                 state.statics.retries.fetch_add(1, Ordering::Relaxed);
+                break;
             }
+        }
         }
     }
 
@@ -974,6 +1027,8 @@ fn proxy(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
 enum ErrorAction {
     Return,
     Retry,
+    /// Send the same request to the same endpoint again, after a short wait.
+    RetrySame,
 }
 
 fn handle_upstream_error(
@@ -989,14 +1044,22 @@ fn handle_upstream_error(
     attempts: &mut Vec<Attempt>,
     req_id: &str,
     sent_body: Option<&Value>,
+    // The caller is willing to send this same request here again, so this answer must not be
+    // recorded as "the endpoint cannot serve it".
+    retry_same: bool,
 ) -> ErrorAction {
     let cfg = state.cfg();
     let brief = crate::sse::brief(parsed);
     acc.rt.record_error(now, status, &brief, latency_ms);
-    maybe_cooldown(state, acc, status, now, parsed);
+    // Cooling the endpoint down (or counting towards its skip streak) is what pushes the *next*
+    // request elsewhere. That is the right answer to a refusal, and the wrong one to a request that
+    // is about to be retried here a moment later.
+    if !retry_same {
+        maybe_cooldown(state, acc, status, now, parsed);
+    }
     // Track "this endpoint cannot serve it" failures: without this a misconfigured endpoint only
     // shows up as a slower request (the retry chain hides it).
-    if classify(&cfg, status, parsed) == Verdict::Retry {
+    if !retry_same && classify(&cfg, status, parsed) == Verdict::Retry {
         crate::persist::mark_dirty();
         let skipped_now = state.router.health.record_failure(
             acc.name(),
@@ -1036,6 +1099,16 @@ fn handle_upstream_error(
         status,
         error: brief,
     });
+    if retry_same {
+        state.statics.retries.fetch_add(1, Ordering::Relaxed);
+        log_warn!(
+            "[{}] {} rate limited; retrying the same endpoint in {}ms",
+            req_id,
+            acc.name(),
+            cfg.router.rate_retry_delay_ms
+        );
+        return ErrorAction::RetrySame;
+    }
     if classify(&cfg, status, parsed) == Verdict::Client {
         state.statics.errors.fetch_add(1, Ordering::Relaxed);
         return_client_error(req, out, status, parsed, text);
