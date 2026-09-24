@@ -282,18 +282,41 @@ export function EndpointSheet({
               guess and becomes the endpoint's real per-token value, which is exactly what "how much
               quota is left" is measured against. */}
           <div className="grid gap-3 sm:grid-cols-2">
-            <Field label={t.endpoints.prices} help={t.endpoints.pricesHint}>
-              <Select
-                value={draft.prices.currency}
-                onChange={(e) => setPrices({ currency: e.target.value })}
-              >
-                <option value="">{t.endpoints.priceCurrencyNone}</option>
-                <option value="USD">USD</option>
-                <option value="RMB">RMB</option>
-                <option value="CNY">CNY</option>
-              </Select>
-            </Field>
-            <div className="grid grid-cols-2 gap-3">
+            {/* Left: how this plan is billed. Right: what each token class costs. Keeping the two
+                apart is the difference between a plan-wide knob (currency, peak window, promotion)
+                and the three rates those knobs act on. */}
+            <div className="grid gap-3 content-start">
+              <Field label={t.endpoints.prices} help={t.endpoints.pricesHint}>
+                <Select
+                  value={draft.prices.currency}
+                  onChange={(e) => setPrices({ currency: e.target.value })}
+                >
+                  <option value="">{t.endpoints.priceCurrencyNone}</option>
+                  <option value="USD">USD</option>
+                  <option value="RMB">RMB</option>
+                  <option value="CNY">CNY</option>
+                </Select>
+              </Field>
+              <Field label={t.endpoints.pricePeak}>
+                <Input
+                  type="number"
+                  step="any"
+                  value={draft.prices.peak_multiplier}
+                  onChange={(e) => setPrices({ peak_multiplier: Number(e.target.value) || 1 })}
+                />
+              </Field>
+              {/* A promotion scales every rate, so it is not a fourth price but a factor over the
+                  three - which is why it sits with the plan knobs rather than beside the rates. */}
+              <Field label={t.endpoints.pricePromo} help={t.endpoints.pricePromoHint}>
+                <Input
+                  type="number"
+                  step="any"
+                  value={draft.prices.promo_multiplier}
+                  onChange={(e) => setPrices({ promo_multiplier: Number(e.target.value) || 1 })}
+                />
+              </Field>
+            </div>
+            <div className="grid grid-cols-2 gap-3 content-start">
               <Field label={t.endpoints.priceIn}>
                 <Input
                   type="number"
@@ -316,24 +339,6 @@ export function EndpointSheet({
                   step="any"
                   value={draft.prices.cached_input}
                   onChange={(e) => setPrices({ cached_input: Number(e.target.value) || 0 })}
-                />
-              </Field>
-              <Field label={t.endpoints.pricePeak}>
-                <Input
-                  type="number"
-                  step="any"
-                  value={draft.prices.peak_multiplier}
-                  onChange={(e) => setPrices({ peak_multiplier: Number(e.target.value) || 1 })}
-                />
-              </Field>
-              {/* A promotion scales every rate, so it is not a fourth price but a factor over the
-                  three. Kept next to them because that is where a plan change gets applied. */}
-              <Field label={t.endpoints.pricePromo} help={t.endpoints.pricePromoHint}>
-                <Input
-                  type="number"
-                  step="any"
-                  value={draft.prices.promo_multiplier}
-                  onChange={(e) => setPrices({ promo_multiplier: Number(e.target.value) || 1 })}
                 />
               </Field>
             </div>
