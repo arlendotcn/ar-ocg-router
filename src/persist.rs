@@ -106,12 +106,15 @@ pub fn load(path: &Path) -> Persisted {
             for (name, c) in xs {
                 let reading = c.get("pending").and_then(crate::state::QuotaReading::from_json);
                 let derived = c.get("derived").and_then(crate::state::QuotaCalibration::from_json);
-                let anchors = c
-                    .get("anchors")
-                    .map(crate::state::QuotaAnchors::from_json)
+                // `windows` (and, in files written before them, the `anchors` they replaced) carry
+                // where the use-driven windows opened.
+                let windows = c
+                    .get("windows")
+                    .or_else(|| c.get("anchors"))
+                    .map(crate::state::QuotaWindows::from_json)
                     .unwrap_or_default();
-                if reading.is_some() || derived.is_some() || anchors.bucket_5h > 0 || anchors.week_reset > 0 {
-                    calibrations.insert(name.clone(), crate::state::CalibrationEntry { reading, derived, anchors });
+                if reading.is_some() || derived.is_some() || windows.rolling_start > 0 || windows.week_start > 0 {
+                    calibrations.insert(name.clone(), crate::state::CalibrationEntry { reading, derived, windows });
                 }
             }
         }
@@ -203,7 +206,7 @@ pub fn save(path: &Path, data: &Persisted, now: i64) -> Result<(), String> {
                 json!({
                     "pending": entry.reading.as_ref().map(|r| r.to_json()).unwrap_or(Value::Null),
                     "derived": entry.derived.as_ref().map(|c| c.to_json()).unwrap_or(Value::Null),
-                    "anchors": entry.anchors.to_json(),
+                    "windows": entry.windows.to_json(),
                 }),
             );
         }

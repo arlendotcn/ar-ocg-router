@@ -494,28 +494,66 @@ impl QuotaReading {
 pub struct CalibrationEntry {
     pub reading: Option<QuotaReading>,
     pub derived: Option<QuotaCalibration>,
-    pub anchors: QuotaAnchors,
+    pub windows: QuotaWindows,
 }
 
-/// The moments each provider window resets, copied from the console's countdowns.
+/// When the use-driven usage windows opened.
 ///
-/// Kept apart from the calibration on purpose: they are not part of the derivation math, they are
-/// the bucket model that lets local percentages line up with the provider's. The user can correct
-/// them at any time and the change applies the moment it arrives - a countdown copied off a console
-/// and submitted two hours later describes the past, so there is no "pending" state to hold it.
+/// The 5-hour and weekly allowances are not a fixed grid. A window ends when its period elapses and
+/// the next one opens at the **first request that arrives after that**, so an idle stretch belongs to
+/// no window at all. A grid rolled forward from a countdown copied off the console therefore drifts as
+/// soon as the user pauses and comes back - which is exactly what the provider's own message showed:
+/// it announced a reset 54 minutes before the grid predicted, and 45 seconds after the first request
+/// that followed the previous window's end.
+///
+/// The monthly window is different: it follows the billing cycle, which really is a calendar rule.
+///
+/// Kept apart from the calibration because these are not part of the derivation math: they are the
+/// window model that lets local percentages line up with the provider's.
 #[derive(Debug, Clone, Default)]
-pub struct QuotaAnchors {
-    pub bucket_5h: i64,
-    pub week_reset: i64,
+pub struct QuotaWindows {
+    /// When the current 5-hour window opened; 0 when none has opened yet.
+    pub rolling_start: i64,
+    /// When the current weekly window opened; 0 when none has opened yet.
+    pub week_start: i64,
 }
 
-impl QuotaAnchors {
+impl QuotaWindows {
     pub fn to_json(&self) -> Value {
-        json!({ "bucket_5h": self.bucket_5h, "week_reset": self.week_reset })
+        json!({ "rolling_start": self.rolling_start, "week_start": self.week_start })
     }
-    pub fn from_json(v: &Value) -> QuotaAnchors {
+
+    /// Open a window for every period that has elapsed. Idempotent: an open window is left alone.
+    pub fn roll(&mut self, now: i64) {
+        if self.rolling_start <= 0 || now >= self.rolling_start + PERIOD_ROLLING {
+            self.rolling_start = now;
+        }
+        if self.week_start <= 0 || now >= self.week_start + PERIOD_WEEKLY {
+            self.week_start = now;
+        }
+    }
+
+    pub fn from_json(v: &Value) -> QuotaWindows {
         let gi = |k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
-        QuotaAnchors { bucket_5h: gi("bucket_5h"), week_reset: gi("week_reset") }
+        // `bucket_5h`/`week_reset` were the *next reset* moments under the old grid model, so a file
+        // written then converts to the window that would have opened one period before it.
+        let start = |key: &str, legacy: &str, period: i64| {
+            let s = gi(key);
+            if s > 0 {
+                s
+            } else {
+                let r = gi(legacy);
+                if r > period {
+                    r - period
+                } else {
+                    0
+                }
+            }
+        };
+        QuotaWindows {
+            rolling_start: start("rolling_start", "bucket_5h", PERIOD_ROLLING),
+            week_start: start("week_start", "week_reset", PERIOD_WEEKLY),
+        }
     }
 }
 
@@ -635,8 +673,8 @@ pub struct QuotaState {
     /// A first reading awaiting its second, and the derivation of a completed pair.
     pub reading: Option<QuotaReading>,
     pub calibration: Option<QuotaCalibration>,
-    /// Bucket reset moments copied from the provider's console; editable at any time.
-    pub anchors: QuotaAnchors,
+    /// When the 5-hour and weekly windows opened; see `QuotaWindows`.
+    pub windows: QuotaWindows,
     pub last_error: Option<String>,
     /// Set when the upstream explicitly reported "out of quota" / 429-budget errors.
     pub exhausted_until: i64,
@@ -655,7 +693,7 @@ impl Default for QuotaState {
             ledger: LocalLedger::default(),
             reading: None,
             calibration: None,
-            anchors: QuotaAnchors::default(),
+            windows: QuotaWindows::default(),
             last_error: None,
             exhausted_until: 0,
             probe_after: 0,
@@ -990,24 +1028,40 @@ impl QuotaState {
             }
             _ => report.unit.as_str().to_string(),
         };
-        // The 5-hour and weekly buckets that a calibration derived are display-only: routing never
+        // The 5-hour and weekly windows that a calibration derived are display-only: routing never
         // sees them (their config limits stay 0, so the report carries no data for them), so the
         // views here are built straight from the derivation. The reference instant is shared by
         // all three windows: it is when the second reading was taken.
         let ref_at = self.calibration.as_ref().map(|c| c.ref_at).unwrap_or(0);
         //
-        // The level comes from the reference reading, not from a bucket-aligned sum: the console's
+        // The level comes from the reference reading, not from a window-aligned sum: the console's
         // percentage at `ref_at` is ground truth for that instant, and the ledger adds everything
-        // forwarded since. Summing the bucket instead would need the ledger to cover the whole
-        // bucket, which a mid-cycle ledger never does for the first week. Once the bucket rolls
-        // over past the reference, the sum is both available and exact, so it takes over.
-        let derived_view =
-            |total: f64, window: i64, next_reset: Option<i64>, baseline: f64, ref_pct: f64| -> Option<Value> {
-            let reset = next_reset?;
-            if total <= 0.0 || reset <= now {
+        // forwarded since. Summing the window instead would need the ledger to cover it from its
+        // start, which only holds once the window opened after the ledger did. Once the reference
+        // falls outside the current window, the sum is both available and exact, so it takes over.
+        //
+        // The window's own start and end come from `windows`, which tracks the provider's rule: a
+        // window opens at the first request after the previous one ended.
+        let derived_view = |total: f64, start: i64, reset: i64, baseline: f64, ref_pct: f64| -> Option<Value> {
+            if start <= 0 || reset <= start {
                 return None;
             }
-            let start = reset - window;
+            // The window has ended and the next one has not opened: no period is running, so nothing
+            // has been consumed in one. Reported as a zeroed view rather than as missing data,
+            // because "the window ended" is a fact and the console shows the same thing.
+            if reset <= now {
+                return Some(json!({
+                    "percent": 0.0,
+                    "projected_percent": 0.0,
+                    "used": 0.0,
+                    "limit": total,
+                    "resets_at": Value::Null,
+                    "has_data": true,
+                }));
+            }
+            if total <= 0.0 {
+                return None;
+            }
             let ref_inside = ref_at > 0
                 && ref_at >= start
                 && ref_at < reset
@@ -1038,14 +1092,26 @@ impl QuotaState {
         let usable = self.calibration.as_ref().filter(|_| !report.plan_changed);
         let rolling_view = match usable {
             Some(c) => {
-                derived_view(c.rolling_total, PERIOD_ROLLING, roll_forward(self.anchors.bucket_5h, PERIOD_ROLLING, now), c.baseline_5h, c.ref_pct_5h)
+                derived_view(
+                    c.rolling_total,
+                    self.windows.rolling_start,
+                    self.windows.rolling_start + PERIOD_ROLLING,
+                    c.baseline_5h,
+                    c.ref_pct_5h,
+                )
                     .unwrap_or_else(|| w(&report.rolling))
             }
             None => w(&report.rolling),
         };
         let weekly_view = match usable {
             Some(c) => {
-                derived_view(c.weekly_total, PERIOD_WEEKLY, roll_forward(self.anchors.week_reset, PERIOD_WEEKLY, now), c.baseline_week, c.ref_pct_week)
+                derived_view(
+                    c.weekly_total,
+                    self.windows.week_start,
+                    self.windows.week_start + PERIOD_WEEKLY,
+                    c.baseline_week,
+                    c.ref_pct_week,
+                )
                     .unwrap_or_else(|| w(&report.weekly))
             }
             None => w(&report.weekly),
@@ -1079,7 +1145,7 @@ impl QuotaState {
                     / 1e6,
             },
             "calibration": {
-                "anchors": self.anchors.to_json(),
+                "windows": self.windows.to_json(),
                 // The derivation exists but was made against another plan value, so its totals are
                 // not being used. The console says so rather than showing a number it distrusts.
                 "plan_changed": report.plan_changed,
@@ -1278,13 +1344,15 @@ impl AccountRuntime {
         }
     }
 
-    /// Update the bucket anchors (the console's reset moments). Applies immediately: a countdown
-    /// copied off a console describes that instant, not whenever some form is eventually submitted.
-    pub fn set_anchors(&self, a: QuotaAnchors) {
+    /// Correct the usage windows by hand. Applies immediately: a countdown copied off a console
+    /// describes that instant, not whenever some form is eventually submitted. The caller turns the
+    /// countdown into a window start (reset minus one period).
+    pub fn set_windows(&self, w: QuotaWindows) {
         if let Ok(mut q) = self.quota.lock() {
-            q.anchors = a;
+            q.windows = w;
         }
     }
+
 
     /// Mark a request as dispatched upstream. The returned guard clears it on drop, so every exit
     /// path - success, upstream error, client abort - is covered by construction.
@@ -1401,6 +1469,10 @@ impl AccountRuntime {
         let tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
         if tokens > 0 {
             if let Ok(mut q) = self.quota.lock() {
+                // A request is what opens a window, so this is the moment to notice that the
+                // previous one has ended. Done before the sample is added so the sample lands
+                // inside the window it belongs to.
+                q.windows.roll(now);
                 // The cost is frozen here, at the rates in force for this request. A later rate
                 // change must not retroactively alter an allowance that has already been spent.
                 q.ledger.add_usage(
@@ -1700,7 +1772,7 @@ impl Registry {
             };
             q.reading = entry.reading.clone();
             q.calibration = entry.derived.clone();
-            q.anchors = entry.anchors.clone();
+            q.windows = entry.windows.clone();
             restored += 1;
         }
         crate::log_info!("restored calibration state for {} allowance(s)", restored);
@@ -1756,13 +1828,13 @@ pub fn calibration_snapshot(state: &crate::proxy::AppState) -> HashMap<String, C
             Ok(q) => q,
             Err(p) => p.into_inner(),
         };
-        if q.reading.is_some() || q.calibration.is_some() || q.anchors.bucket_5h > 0 || q.anchors.week_reset > 0 {
+        if q.reading.is_some() || q.calibration.is_some() || q.windows.rolling_start > 0 || q.windows.week_start > 0 {
             out.insert(
                 Registry::quota_key(&rt),
                 CalibrationEntry {
                     reading: q.reading.clone(),
                     derived: q.calibration.clone(),
-                    anchors: q.anchors.clone(),
+                    windows: q.windows.clone(),
                 },
             );
         }

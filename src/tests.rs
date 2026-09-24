@@ -766,37 +766,95 @@ fn two_readings_derive_the_window_totals_and_the_price_factor() {
     assert!(v["calibration"]["derived"].get("rate_factor").is_none(), "and so is its replacement");
 }
 
-/// A bucket's local percentage must line up with the provider's console, which means summing from
-/// the bucket's own start rather than from a trailing five hours.
+/// A window's local percentage must line up with the provider's console, which means summing from
+/// the window's own start - not from a trailing five hours, and not from a clock grid.
 #[test]
-fn a_derived_bucket_reports_from_its_own_start() {
+fn a_derived_window_reports_from_its_own_start() {
     use crate::state::{LocalLedger, QuotaCalibration, QuotaState};
 
     let at = |s: &str| timeutil::parse_iso8601(s).unwrap();
     let mut q = QuotaState::default();
     q.ledger = LocalLedger::default();
     let now = at("2026-08-28T03:00:00Z");
-    // The console said this bucket resets in 2 hours, so it started 3 hours ago.
-    let reset = now + 2 * 3600;
-    // `rolling_total` is money, so the samples are sized in tokens that price to the same money at
-    // PRICES (1.0 per 1M): 100 RMB of allowance, 30 spent inside the bucket.
+    // The window opened three hours ago, so it ends in two.
+    let start = now - 3 * 3600;
     let total = 100.0f64;
-    q.ledger.add_usage(reset - 5 * 3600 - 3600, crate::state::Usage { prompt: 50_000_000, cached: 0, completion: 0 }, 50.0);
-    q.ledger.add_usage(reset - 3600, crate::state::Usage { prompt: 30_000_000, cached: 0, completion: 0 }, 30.0);
+    // One sample before the window, one inside it.
+    q.ledger.add_usage(start - 3600, crate::state::Usage { prompt: 50_000_000, cached: 0, completion: 0 }, 50.0);
+    q.ledger.add_usage(start + 600, crate::state::Usage { prompt: 30_000_000, cached: 0, completion: 0 }, 30.0);
 
     q.calibration = Some(QuotaCalibration { rolling_total: total, weekly_total: 0.0, ..Default::default() });
-    // The anchor lives apart from the derivation: it is the bucket model, editable on its own.
-    q.anchors = crate::state::QuotaAnchors { bucket_5h: reset, week_reset: 0 };
+    // The window lives apart from the derivation: it is the window model, tracked on its own.
+    q.windows.rolling_start = start;
     let report = q.report(now, 3_600, 80.0, true, 99.0, &crate::config::QuotaCfg::default());
     let v = q.to_json(now, &report, "RMB", &crate::state::AccountStats::default());
-    assert_eq!(v["rolling"]["used"], 30.0, "only the in-bucket sample counts");
+    assert_eq!(v["rolling"]["used"], 30.0, "only the in-window sample counts");
     assert_eq!(v["rolling"]["percent"], 30.0);
     assert_eq!(v["rolling"]["limit"], total);
-    // The bucket rolls forward by whole periods, so a later read still finds a future reset.
-    let later = reset + 3600;
+    assert_eq!(v["rolling"]["resets_at"], timeutil::iso8601(start + 5 * 3600).as_str());
+
+    // Reading again before it ends does not move it: the end is the start plus one period.
+    let later = start + 4 * 3600;
     let report2 = q.report(later, 3_600, 80.0, true, 99.0, &crate::config::QuotaCfg::default());
     let v2 = q.to_json(later, &report2, "RMB", &crate::state::AccountStats::default());
-    assert_eq!(v2["rolling"]["resets_at"], timeutil::iso8601(reset + 5 * 3600).as_str());
+    assert_eq!(v2["rolling"]["resets_at"], timeutil::iso8601(start + 5 * 3600).as_str());
+
+    // Past the end with nothing forwarded since, no period is running: nothing has been consumed in
+    // one, and there is no reset to show because the next window opens on the next request.
+    let after = start + 5 * 3600 + 60;
+    let report3 = q.report(after, 3_600, 80.0, true, 99.0, &crate::config::QuotaCfg::default());
+    let v3 = q.to_json(after, &report3, "RMB", &crate::state::AccountStats::default());
+    assert_eq!(v3["rolling"]["used"], 0.0);
+    assert_eq!(v3["rolling"]["percent"], 0.0);
+    assert!(v3["rolling"]["resets_at"].is_null(), "no window is open, so none ends");
+}
+
+/// A window opens at the first request after the previous one ended, so idle time between two
+/// windows belongs to neither. This is the rule the provider itself announced: its reset message
+/// named a moment 54 minutes before a fixed grid would have, and 45 seconds after the first request
+/// that followed the previous window's end.
+#[test]
+fn a_window_opens_at_the_first_request_after_the_previous_one_ended() {
+    use crate::state::{QuotaState, PERIOD_ROLLING, PERIOD_WEEKLY};
+
+    let mut q = QuotaState::default();
+    let t0 = 1_800_000_000i64;
+    q.windows.roll(t0);
+    assert_eq!(q.windows.rolling_start, t0, "the first use opens the first window");
+    assert_eq!(q.windows.week_start, t0, "and the weekly one, which was also unset");
+
+    q.windows.roll(t0 + 3600);
+    assert_eq!(q.windows.rolling_start, t0, "still inside it");
+
+    // Four hours of silence, then a request: the window ended, and this request opens the next.
+    let t1 = t0 + PERIOD_ROLLING + 4 * 3600;
+    q.windows.roll(t1);
+    assert_eq!(q.windows.rolling_start, t1, "the idle stretch belongs to no window");
+    assert_eq!(q.windows.week_start, t0, "the weekly window is unaffected by a 5-hour roll");
+
+    q.windows.roll(t0 + PERIOD_WEEKLY + 60);
+    assert_eq!(q.windows.week_start, t0 + PERIOD_WEEKLY + 60);
+}
+
+/// Files written under the old grid model stored the *next reset*; the window that implies is the
+/// one that would have opened one period earlier.
+#[test]
+fn older_files_convert_their_reset_moments_to_window_starts() {
+    use crate::state::{QuotaWindows, PERIOD_ROLLING, PERIOD_WEEKLY};
+
+    let v = serde_json::json!({ "bucket_5h": 1_700_000_000i64, "week_reset": 1_700_000_000i64 });
+    let w = QuotaWindows::from_json(&v);
+    assert_eq!(w.rolling_start, 1_700_000_000 - PERIOD_ROLLING);
+    assert_eq!(w.week_start, 1_700_000_000 - PERIOD_WEEKLY);
+
+    // A reset smaller than a period says nothing usable, so it clears rather than going negative.
+    let w = QuotaWindows::from_json(&serde_json::json!({ "bucket_5h": 60 }));
+    assert_eq!(w.rolling_start, 0);
+
+    // The current shape round-trips.
+    let w = QuotaWindows { rolling_start: 111, week_start: 222 };
+    let back = QuotaWindows::from_json(&w.to_json());
+    assert_eq!((back.rolling_start, back.week_start), (111, 222));
 }
 
 /// Calibration state must survive a restart: the wizard spans a consumption window that can
@@ -838,12 +896,12 @@ fn calibration_state_round_trips_through_the_state_file() {
     assert_eq!(back.verified_at, cal.verified_at);
     assert!((back.ref_pct_month - 44.0).abs() < 1e-9);
 
-    // The anchors travel with the entry but independently of the derivation.
-    let anchors = crate::state::QuotaAnchors { bucket_5h: 1_700_103_600, week_reset: 1_700_600_000 };
-    let aj = anchors.to_json();
-    let back_a = crate::state::QuotaAnchors::from_json(&aj);
-    assert_eq!(back_a.bucket_5h, anchors.bucket_5h);
-    assert_eq!(back_a.week_reset, anchors.week_reset);
+    // The windows travel with the entry but independently of the derivation.
+    let windows = crate::state::QuotaWindows { rolling_start: 1_700_100_000, week_start: 1_700_600_000 };
+    let wj = windows.to_json();
+    let back_w = crate::state::QuotaWindows::from_json(&wj);
+    assert_eq!(back_w.rolling_start, windows.rolling_start);
+    assert_eq!(back_w.week_start, windows.week_start);
 }
 
 // ------------------------------------------------------------------ quota unit reporting
@@ -1320,8 +1378,8 @@ fn a_derived_bucket_anchors_on_the_reference_when_the_ledger_starts_late() {
     let mut q = QuotaState::default();
     q.ledger = LocalLedger::default();
     q.ledger.add_usage(at("2026-09-21T13:30:00Z"), crate::state::Usage { prompt: 1_000_000, cached: 0, completion: 0 }, 1.0);
-    q.anchors.bucket_5h = at("2026-09-21T17:29:00Z");
-    q.anchors.week_reset = at("2026-09-27T15:28:00Z");
+    q.windows.rolling_start = at("2026-09-21T12:29:00Z");
+    q.windows.week_start = at("2026-09-20T15:28:00Z");
     q.calibration = Some(QuotaCalibration {
         calibrated_at: at("2026-09-21T13:04:00Z"),
         rolling_total: 13.24,

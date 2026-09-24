@@ -375,8 +375,15 @@ export function CalibrationWizard({
                     onClick={() => void run("sync", base, true)}>
                     {t.endpoints.calSync}
                   </Button>
+                  {/* One reading pins a window total, because the window itself is tracked: the
+                      ledger already holds everything forwarded inside it. */}
+                  <Button size="sm" variant="ghost" disabled={busy}
+                    onClick={() => void run("limits", base, true)}>
+                    {t.endpoints.calLimits}
+                  </Button>
                 </div>
                 <div className="text-2xs text-[var(--ink-faint)]">{t.endpoints.calSyncHint}</div>
+                <div className="text-2xs text-[var(--ink-faint)]">{t.endpoints.calLimitsHint}</div>
               </div>
             ) : editingBase ? (
               <div className="flex gap-2">

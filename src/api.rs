@@ -1102,18 +1102,133 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
                 }),
             );
         }
+        "limits" => {
+            // Derive a window's total from a *single* reading, using the window the router tracks.
+            //
+            // Two readings are normally needed because the money level at the first one is unknown.
+            // Here it is known: the window is tracked from the request that opened it, so the ledger
+            // already holds everything forwarded inside it. One reading then pins the total directly,
+            // `total = money_in_window / (reading / 100)`. It is only as good as that assumption -
+            // traffic inside the window that the router never forwarded would make the total read low.
+            let p5 = num_at(&doc, "pct_5h");
+            let pw = num_at(&doc, "pct_week");
+            if p5.is_none() && pw.is_none() {
+                error_response(req, out, 400, "give pct_5h and/or pct_week, copied from the console");
+                return true;
+            }
+            let (w, money_5h, money_week) = {
+                let q = match rt.quota.lock() {
+                    Ok(q) => q,
+                    Err(p) => p.into_inner(),
+                };
+                (
+                    q.windows.clone(),
+                    q.ledger.cost_since(q.windows.rolling_start),
+                    q.ledger.cost_since(q.windows.week_start),
+                )
+            };
+            let measure = |label: &str, start: i64, period: i64, pct: Option<f64>, money: f64| {
+                let Some(p) = pct else { return Ok(None) };
+                if start <= 0 || now >= start + period {
+                    return Err(format!(
+                        "no {label} window is open: the last one ended and the next opens on the next request"
+                    ));
+                }
+                if !(0.0..=100.0).contains(&p) {
+                    return Err(format!("{label}: the reading must be a percentage between 0 and 100"));
+                }
+                if p <= 0.0 {
+                    return Err(format!("{label}: the reading must be above 0% to derive a total"));
+                }
+                if money <= 0.0 {
+                    return Err(format!("{label}: the ledger recorded nothing inside this window"));
+                }
+                Ok(Some(money / (p / 100.0)))
+            };
+            let t5 = match measure("5-hour", w.rolling_start, crate::state::PERIOD_ROLLING, p5, money_5h) {
+                Ok(v) => v,
+                Err(e) => {
+                    error_response(req, out, 409, &e);
+                    return true;
+                }
+            };
+            let tw = match measure("weekly", w.week_start, crate::state::PERIOD_WEEKLY, pw, money_week) {
+                Ok(v) => v,
+                Err(e) => {
+                    error_response(req, out, 409, &e);
+                    return true;
+                }
+            };
+            let mut q = match rt.quota.lock() {
+                Ok(q) => q,
+                Err(p) => p.into_inner(),
+            };
+            // A total is what a reference is a percentage *of*, so a baseline computed from the old
+            // total has to move with it or the anchored level would mix two scales.
+            match q.calibration.as_mut() {
+                Some(c) => {
+                    if let Some(v) = t5 {
+                        c.rolling_total = v;
+                    }
+                    if let Some(v) = tw {
+                        c.weekly_total = v;
+                    }
+                    c.baseline_5h = c.rolling_total * c.ref_pct_5h / 100.0;
+                    c.baseline_week = c.weekly_total * c.ref_pct_week / 100.0;
+                }
+                None => {
+                    // No derivation yet: this reading is one, so it gets the stamp that makes it
+                    // real. The rates are left alone - they are the user's to set.
+                    q.calibration = Some(crate::state::QuotaCalibration {
+                        calibrated_at: now,
+                        rolling_total: t5.unwrap_or(0.0),
+                        weekly_total: tw.unwrap_or(0.0),
+                        ..Default::default()
+                    });
+                }
+            }
+            let (out5, outw) = (q.calibration.as_ref().map(|c| c.rolling_total), q.calibration.as_ref().map(|c| c.weekly_total));
+            drop(q);
+            crate::persist::mark_dirty();
+            log_info!("[{}] allowance totals derived from one reading", name);
+            json_response(
+                req,
+                out,
+                200,
+                &json!({
+                    "stage": "limits",
+                    "rolling_total": out5,
+                    "weekly_total": outw,
+                    "window_5h_money": (money_5h * 1e6).round() / 1e6,
+                    "window_week_money": (money_week * 1e6).round() / 1e6,
+                }),
+            );
+        }
         "anchors" => {
-            // The console's reset countdowns, applicable the moment they arrive. Kept apart from
-            // the readings: they are the bucket model, not part of the derivation.
-            let cd_5h = int_at(&doc, "cd_5h").unwrap_or(0).max(0);
-            let cd_week = int_at(&doc, "cd_week").unwrap_or(0).max(0);
-            // Zero means "not known", so it must clear the anchor rather than store "resets right
-            // now" - an anchor sitting on the present instant would report a bucket that is always
-            // just about to roll over.
-            rt.set_anchors(crate::state::QuotaAnchors {
-                bucket_5h: if cd_5h > 0 { now + cd_5h } else { 0 },
-                week_reset: if cd_week > 0 { now + cd_week } else { 0 },
-            });
+            // The console's reset countdowns, applicable the moment they arrive, used to correct the
+            // window model by hand. They say when a window *ends*, so the start it implies is one
+            // period earlier; that start is what the display sums from.
+            // A countdown that was not sent leaves its window alone: correcting one of the two
+            // must not silently clear the other. Zero means "not known", which does clear it -
+            // storing a window that opens right now would read as one always about to roll over.
+            let live = rt.quota.lock().map(|q| q.windows.clone()).unwrap_or_default();
+            let read = |key: &str, period: i64, current: i64| -> i64 {
+                match int_at(&doc, key) {
+                    None => current,
+                    Some(cd) if cd > 0 => {
+                        // A countdown longer than the period would put the start in the future; the
+                        // window cannot have opened after now, so it is clamped.
+                        (now + cd - period).min(now)
+                    }
+                    Some(_) => 0,
+                }
+            };
+            let w = crate::state::QuotaWindows {
+                rolling_start: read("cd_5h", crate::state::PERIOD_ROLLING, live.rolling_start),
+                week_start: read("cd_week", crate::state::PERIOD_WEEKLY, live.week_start),
+            };
+            let resets = (w.rolling_start, w.week_start);
+            rt.set_windows(w);
             crate::persist::mark_dirty();
             json_response(
                 req,
@@ -1121,8 +1236,10 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
                 200,
                 &json!({
                     "stage": "anchors",
-                    "bucket_5h_resets_at": if cd_5h > 0 { json!(crate::timeutil::iso8601(now + cd_5h)) } else { Value::Null },
-                    "week_resets_at": if cd_week > 0 { json!(crate::timeutil::iso8601(now + cd_week)) } else { Value::Null },
+                    "rolling_start": if resets.0 > 0 { json!(crate::timeutil::iso8601(resets.0)) } else { Value::Null },
+                    "week_start": if resets.1 > 0 { json!(crate::timeutil::iso8601(resets.1)) } else { Value::Null },
+                    "rolling_resets_at": if resets.0 > 0 { json!(crate::timeutil::iso8601(resets.0 + crate::state::PERIOD_ROLLING)) } else { Value::Null },
+                    "week_resets_at": if resets.1 > 0 { json!(crate::timeutil::iso8601(resets.1 + crate::state::PERIOD_WEEKLY)) } else { Value::Null },
                 }),
             );
         }
@@ -1210,27 +1327,22 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
                 error_response(req, out, 500, "derived a non-usable rate factor; check the configured prices");
                 return true;
             }
-            // A window whose readings span one of its own resets says nothing about its total, so
-            // such a window is skipped rather than derived from broken numbers. With a recorded
-            // anchor the reset moments are exact; without one, a span as long as the window itself
-            // guarantees a crossing.
-            let anchors = rt.quota.lock().map(|q| q.anchors.clone()).unwrap_or_default();
-            let crossed = |anchor: i64, window: i64| -> bool {
-                if anchor > 0 {
-                    let r = crate::state::roll_forward(anchor, window, t2).unwrap_or(t2);
-                    r - window > t1
-                } else {
-                    t2 - t1 >= window
-                }
+            // A window whose readings span one of its own boundaries says nothing about its total,
+            // so it is skipped rather than derived from broken numbers. The windows are use-driven,
+            // so a boundary is crossed exactly when one opened between the readings - which the
+            // tracked start reveals - or, failing that, when the span is a whole period long.
+            let tracked = rt.quota.lock().map(|q| q.windows.clone()).unwrap_or_default();
+            let crossed = |start: i64, period: i64| -> bool {
+                (start > t1 && start <= t2) || t2 - t1 >= period
             };
             let d_5h = p5 - r1.pct_5h;
-            let rolling_total = if crossed(anchors.bucket_5h, crate::state::PERIOD_ROLLING) || d_5h < CALIBRATE_MIN_DELTA_PP {
+            let rolling_total = if crossed(tracked.rolling_start, crate::state::PERIOD_ROLLING) || d_5h < CALIBRATE_MIN_DELTA_PP {
                 0.0
             } else {
                 k * l * 100.0 / d_5h
             };
             let d_week = pw - r1.pct_week;
-            let weekly_total = if crossed(anchors.week_reset, crate::state::PERIOD_WEEKLY) || d_week < CALIBRATE_MIN_DELTA_PP {
+            let weekly_total = if crossed(tracked.week_start, crate::state::PERIOD_WEEKLY) || d_week < CALIBRATE_MIN_DELTA_PP {
                 0.0
             } else {
                 k * l * 100.0 / d_week
