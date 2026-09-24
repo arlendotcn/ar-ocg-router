@@ -213,7 +213,6 @@ export function EndpointsPage() {
         open={editing !== null}
         endpoint={editing?.endpoint ?? null}
         library={library}
-        peakWindows={stats?.router.peak_windows}
         onClose={() => setEditing(null)}
         onCommit={commit}
         onTest={async (endpoint) => {
