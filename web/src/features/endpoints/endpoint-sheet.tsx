@@ -297,24 +297,26 @@ export function EndpointSheet({
                   <option value="CNY">CNY</option>
                 </Select>
               </Field>
-              <Field label={t.endpoints.pricePeak}>
-                <Input
-                  type="number"
-                  step="any"
-                  value={draft.prices.peak_multiplier}
-                  onChange={(e) => setPrices({ peak_multiplier: Number(e.target.value) || 1 })}
-                />
-              </Field>
-              {/* A promotion scales every rate, so it is not a fourth price but a factor over the
-                  three - which is why it sits with the plan knobs rather than beside the rates. */}
-              <Field label={t.endpoints.pricePromo} help={t.endpoints.pricePromoHint}>
-                <Input
-                  type="number"
-                  step="any"
-                  value={draft.prices.promo_multiplier}
-                  onChange={(e) => setPrices({ promo_multiplier: Number(e.target.value) || 1 })}
-                />
-              </Field>
+              {/* The two factors scale all three rates, so they pair up as one row of plan knobs -
+                  the same shape the rates they act on take in the column beside them. */}
+              <div className="grid grid-cols-2 gap-3">
+                <Field label={t.endpoints.pricePeak}>
+                  <Input
+                    type="number"
+                    step="any"
+                    value={draft.prices.peak_multiplier}
+                    onChange={(e) => setPrices({ peak_multiplier: Number(e.target.value) || 1 })}
+                  />
+                </Field>
+                <Field label={t.endpoints.pricePromo} help={t.endpoints.pricePromoHint}>
+                  <Input
+                    type="number"
+                    step="any"
+                    value={draft.prices.promo_multiplier}
+                    onChange={(e) => setPrices({ promo_multiplier: Number(e.target.value) || 1 })}
+                  />
+                </Field>
+              </div>
             </div>
             <div className="grid grid-cols-2 gap-3 content-start">
               <Field label={t.endpoints.priceIn}>
