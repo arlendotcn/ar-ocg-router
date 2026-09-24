@@ -372,18 +372,31 @@ export function CalibrationWizard({
                       windows are measured from without touching the rates or their totals, so it
                       is available whenever a console reading is worth copying. */}
                   <Button size="sm" variant="ghost" disabled={busy}
-                    onClick={() => void run("sync", base, true)}>
+                    onClick={() => void run("sync", base)}>
                     {t.endpoints.calSync}
                   </Button>
                   {/* One reading pins a window total, because the window itself is tracked: the
                       ledger already holds everything forwarded inside it. */}
                   <Button size="sm" variant="ghost" disabled={busy}
-                    onClick={() => void run("limits", base, true)}>
+                    onClick={() => void run("limits", base)}>
                     {t.endpoints.calLimits}
                   </Button>
                 </div>
                 <div className="text-2xs text-[var(--ink-faint)]">{t.endpoints.calSyncHint}</div>
                 <div className="text-2xs text-[var(--ink-faint)]">{t.endpoints.calLimitsHint}</div>
+                {/* Neither of the two writes the endpoint's own config, so neither closes the
+                    sheet: the wizard reads its live state from the statistics stream and the
+                    confirmation below says what the action did. */}
+                {result?.synced ? (
+                  <div className="text-2xs text-[var(--up)]">{t.endpoints.calSyncDone}</div>
+                ) : null}
+                {result?.stage === "limits" ? (
+                  <div className="mono text-2xs text-[var(--up)]">
+                    {t.endpoints.calLimitsDone
+                      .replace("{n}", (result.rolling_total ?? 0).toFixed(2))
+                      .replace("{m}", (result.weekly_total ?? 0).toFixed(2))}
+                  </div>
+                ) : null}
               </div>
             ) : editingBase ? (
               <div className="flex gap-2">

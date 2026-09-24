@@ -428,7 +428,12 @@ impl LocalLedger {
         for p in parts {
             all.extend(p.samples.into_iter());
         }
-        all.sort_by_key(|s| s.ts);
+        // Sorted by the whole identity, not just the timestamp: `dedup_by` only compares neighbours,
+        // so two copies of one sample stay apart if other samples share its second - which is the
+        // common case in a burst. Sorting by the full key puts every duplicate next to its twin.
+        all.sort_by(|a, b| {
+            (a.ts, a.prompt, a.cached, a.completion).cmp(&(b.ts, b.prompt, b.cached, b.completion))
+        });
         all.dedup_by(|a, b| {
             a.ts == b.ts && a.prompt == b.prompt && a.cached == b.cached && a.completion == b.completion
         });
@@ -648,6 +653,40 @@ impl QuotaCalibration {
             baseline_monthly: g("baseline_monthly"),
         })
     }
+}
+
+/// A window total derived from a single console reading.
+///
+/// Two readings are normally needed because the money level at the first one is unknown. A window the
+/// router tracks makes it known - the ledger holds everything forwarded since it opened - so one
+/// reading pins the total: `total = money in the window / (reading / 100)`.
+///
+/// Refused rather than guessed when there is nothing to measure: a window that is closed (no period is
+/// running), a reading of zero (nothing to divide by), or a window the ledger recorded nothing in.
+/// `label` names the window so the message says which one went wrong.
+pub fn window_total_from_reading(
+    start: i64,
+    period: i64,
+    now: i64,
+    pct: f64,
+    money: f64,
+    label: &str,
+) -> Result<f64, String> {
+    if start <= 0 || now >= start + period {
+        return Err(format!(
+            "no {label} window is open: the last one ended and the next opens on the next request"
+        ));
+    }
+    if !(0.0..=100.0).contains(&pct) {
+        return Err(format!("{label}: the reading must be a percentage between 0 and 100"));
+    }
+    if pct <= 0.0 {
+        return Err(format!("{label}: the reading must be above 0% to derive a total"));
+    }
+    if money <= 0.0 {
+        return Err(format!("{label}: the ledger recorded nothing inside this window"));
+    }
+    Ok(money / (pct / 100.0))
 }
 
 /// Roll a recorded reset forward until it lies in the future, by whole periods.
@@ -1708,31 +1747,45 @@ impl Registry {
         // endpoint, and each holds only that model's share of the plan; the shares must be merged
         // rather than one of them winning, or grouping would discard real consumption. Records are
         // merged by timestamp so a sample is never counted twice.
-        let mut by_cell: HashMap<usize, (Arc<Mutex<QuotaState>>, Vec<LocalLedger>, crate::config::PricesCfg, bool)> =
-            HashMap::new();
+        struct CellParts {
+            cell: Arc<Mutex<QuotaState>>,
+            parts: Vec<LocalLedger>,
+            /// Which records this allowance has already taken, so none is taken twice.
+            seen: std::collections::HashSet<String>,
+            rates: crate::config::PricesCfg,
+            peak: bool,
+        }
+        let mut by_cell: HashMap<usize, CellParts> = HashMap::new();
         for rt in m.values() {
             let key = Registry::quota_key(rt);
-            let mut parts: Vec<LocalLedger> = Vec::new();
-            if let Some(l) = ledgers.get(&key) {
-                parts.push(l.clone());
-            }
-            // Also pick up any per-endpoint record under this endpoint's own name: an old file has
-            // no group record at all, and a partially migrated one may have both.
-            if rt.name != key {
-                if let Some(l) = ledgers.get(&rt.name) {
-                    parts.push(l.clone());
-                }
-            }
-            if parts.is_empty() {
-                continue;
-            }
             let id = Arc::as_ptr(&rt.quota) as usize;
             let rates = prices_of(&rt.name);
-            let entry = by_cell.entry(id).or_insert_with(|| (rt.quota.clone(), Vec::new(), rates, peak));
-            entry.1.extend(parts);
+            let entry = by_cell.entry(id).or_insert_with(|| CellParts {
+                cell: rt.quota.clone(),
+                parts: Vec::new(),
+                seen: std::collections::HashSet::new(),
+                rates,
+                peak,
+            });
+            // Two models on one plan resolve to the same key, so without this the same record would
+            // be merged once per model - and merging a ledger with itself duplicates every sample
+            // that shares a timestamp with another, which silently inflates the allowance.
+            let mut sources = vec![key.clone()];
+            // The endpoint's own name too: an old file has no group record at all, and a partially
+            // migrated one may hold both.
+            if rt.name != key {
+                sources.push(rt.name.clone());
+            }
+            for source in sources {
+                if entry.seen.insert(source.clone()) {
+                    if let Some(l) = ledgers.get(&source) {
+                        entry.parts.push(l.clone());
+                    }
+                }
+            }
         }
         let mut restored = 0usize;
-        for (_, (cell, parts, rates, peak)) in by_cell {
+        for (_, CellParts { cell, parts, rates, peak, .. }) in by_cell {
             let mut merged = LocalLedger::merge(parts);
             // A one-time migration for pre-money files: price whatever arrived without a cost.
             merged.price_unpriced(&rates, peak);

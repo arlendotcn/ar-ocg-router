@@ -1037,12 +1037,13 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
         return true;
     };
     let now = crate::util::now_secs();
-    let peak = cfg.is_peak(now);
+    // No rates are needed anywhere in here: the ledger holds money, so a derivation corrects the
+    // rates and never has to price anything itself.
     match stage.as_str() {
         "cancel" => {
             // Only the unfinished half is discarded: a derivation that already completed is a
             // result the user may want to keep, and aborting a fresh re-calibration must not
-            // destroy it. The bucket anchors are independent of both and stay.
+            // destroy it. The windows are independent of both and stay.
             rt.clear_reading();
             crate::persist::mark_dirty();
             json_response(req, out, 200, &json!({"cancelled": true}));
@@ -1128,22 +1129,13 @@ fn calibrate_endpoint(state: &Arc<AppState>, req: &Request, out: &mut Responder,
                 )
             };
             let measure = |label: &str, start: i64, period: i64, pct: Option<f64>, money: f64| {
-                let Some(p) = pct else { return Ok(None) };
-                if start <= 0 || now >= start + period {
-                    return Err(format!(
-                        "no {label} window is open: the last one ended and the next opens on the next request"
-                    ));
+                match pct {
+                    None => Ok(None),
+                    Some(p) => {
+                        crate::state::window_total_from_reading(start, period, now, p, money, label)
+                            .map(Some)
+                    }
                 }
-                if !(0.0..=100.0).contains(&p) {
-                    return Err(format!("{label}: the reading must be a percentage between 0 and 100"));
-                }
-                if p <= 0.0 {
-                    return Err(format!("{label}: the reading must be above 0% to derive a total"));
-                }
-                if money <= 0.0 {
-                    return Err(format!("{label}: the ledger recorded nothing inside this window"));
-                }
-                Ok(Some(money / (p / 100.0)))
             };
             let t5 = match measure("5-hour", w.rolling_start, crate::state::PERIOD_ROLLING, p5, money_5h) {
                 Ok(v) => v,

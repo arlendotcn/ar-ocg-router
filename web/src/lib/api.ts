@@ -156,7 +156,7 @@ export type BackupEntry = {
 
 /** What a calibration stage answered. The shape varies by stage, so all fields are optional. */
 export type CalibrationResult = {
-  stage?: "start" | "finish" | "verify" | "cancel" | "sync" | "anchors";
+  stage?: "start" | "finish" | "verify" | "cancel" | "sync" | "anchors" | "limits";
   recorded?: boolean;
   cancelled?: boolean;
   /** sync: the level was re-anchored on the provider's current reading. */
@@ -169,6 +169,9 @@ export type CalibrationResult = {
   rate_factor?: number;
   rolling_total?: number;
   weekly_total?: number;
+  /** limits: the money the ledger holds inside each window, which the totals were derived from. */
+  window_5h_money?: number;
+  window_week_money?: number;
   saved_prices?: boolean;
   reloaded?: boolean;
   note?: string;

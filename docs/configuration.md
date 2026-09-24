@@ -151,7 +151,30 @@ the day the provider resets, so the amount and the percentage would disagree at 
 an operator looks - a 0% window beside the whole of last cycle's spend. The lifetime total is
 unaffected by the cycle, so nothing is forgotten.
 
-### Calibration: deriving the real allowance from two readings
+### The 5-hour and weekly windows open on use, not on a clock
+
+The monthly window follows the calendar; the two shorter ones do not. A window ends when its period
+elapses, and the next one opens at the **first request that arrives after that** - so an idle stretch
+belongs to no window at all, and a window's span is not knowable in advance.
+
+A fixed grid rolled forward from a countdown read off the console cannot express this: it drifts the
+moment you pause and come back. The provider states the rule itself whenever it refuses a request
+over quota - "it will reset at ..." - and that instant is only reproducible when the window is
+anchored on use.
+
+Two consequences:
+
+- The amount beside a window is the ledger's sum since that window opened, so it lines up with the
+  console's percentage with no correction - provided the traffic inside the window really did go
+  through the router.
+- Between a window's end and the next request, no period is running: the window reads zero and shows
+  no reset, rather than a countdown to a boundary that has already passed.
+
+`CD 5h` and `CD week` (the console's reset countdowns) are still applied the moment they arrive, but
+they now correct the window's *start* - the countdown minus one period - instead of feeding a grid.
+Sending one leaves the other window alone; zero clears it.
+
+### Calibration: deriving the real allowance from console readings
 
 The router only sees traffic **it forwarded itself**, and a plan without a usage API starts its
 local ledger from zero while the provider's console already shows a consumed percentage. The
@@ -194,6 +217,14 @@ what the console shows now. It moves the level and nothing else, because the cor
 window totals are properties of the plan rather than of the current level - a resync never costs you
 a derivation. Reach for it when the allowance moved for reasons the router never saw, such as the
 same credential being used elsewhere.
+
+A third action derives a window total from a **single** reading. Two readings are normally needed
+because the money level at the first one is unknown; with the window tracked from the request that
+opened it, the level is known, so `total = money forwarded inside the window / reading` pins the total
+outright. Anything sent for a window that is closed, or whose reading is zero, is refused rather than
+guessed. It is accurate only when everything inside that window went through the router - traffic that
+bypassed it makes the total read low, which is the safe direction, since the window will then appear
+more used than it is.
 
 Editing `quota.monthly` is the one change that does retire a derivation, because both window totals
 are linear in it: after the change they are wrong by that ratio while the stored level stays where it

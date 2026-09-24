@@ -498,7 +498,6 @@ fn an_empty_money_window_is_not_negative_zero() {
     use crate::state::LocalLedger;
 
     let l = LocalLedger::default();
-    let p = crate::config::PricesCfg { currency: "CNY".into(), input: 1.0, output: 1.0, cached_input: 1.0, peak_multiplier: 1.0, promo_multiplier: 1.0 };
     for (name, v) in [
         ("total", l.cost_since(0)),
         ("rolling", l.window_cost(1_000_000, 5 * 3600)),
@@ -1736,5 +1735,75 @@ fn a_derivation_without_a_money_baseline_still_anchors() {
         "200 x 44.28% plus 1.0 of forwarded traffic, got {}",
         r.monthly.used
     );
+}
+
+
+/// One reading pins a window's total, and the refusals matter as much as the arithmetic: a guess
+/// written into an allowance would be indistinguishable from a measured one afterwards.
+#[test]
+fn a_window_total_comes_from_one_reading() {
+    use crate::state::{window_total_from_reading, PERIOD_ROLLING};
+
+    let start = 1_800_000_000i64;
+    let now = start + 3600;
+
+    // 4.40 spent, and the console says that is 40% of the window: the window is 11.00.
+    let total = window_total_from_reading(start, PERIOD_ROLLING, now, 40.0, 4.4, "5-hour").unwrap();
+    assert!((total - 11.0).abs() < 1e-9, "got {total}");
+
+    // The window's start is fixed, so an idle stretch is simply not part of any window.
+    assert!(window_total_from_reading(start, PERIOD_ROLLING, start + PERIOD_ROLLING, 40.0, 4.4, "5-hour").is_err());
+    assert!(window_total_from_reading(0, PERIOD_ROLLING, now, 40.0, 4.4, "5-hour").is_err());
+
+    // Nothing to divide by, and nothing to divide.
+    assert!(window_total_from_reading(start, PERIOD_ROLLING, now, 0.0, 4.4, "5-hour").is_err());
+    assert!(window_total_from_reading(start, PERIOD_ROLLING, now, 40.0, 0.0, "5-hour").is_err());
+
+    // A percentage outside 0-100 is a typo, not a measurement.
+    assert!(window_total_from_reading(start, PERIOD_ROLLING, now, 101.0, 4.4, "5-hour").is_err());
+    assert!(window_total_from_reading(start, PERIOD_ROLLING, now, -1.0, 4.4, "5-hour").is_err());
+
+    // The message names the window, because the caller reports it verbatim.
+    let e = window_total_from_reading(start, PERIOD_ROLLING, now, 0.0, 4.4, "weekly").unwrap_err();
+    assert!(e.starts_with("weekly:"), "got {e}");
+
+    // 100% is a legitimate reading (the console clamps there), and it yields the money spent.
+    let total = window_total_from_reading(start, PERIOD_ROLLING, now, 100.0, 11.611, "5-hour").unwrap();
+    assert!((total - 11.611).abs() < 1e-9, "got {total}");
+}
+
+
+/// Merging a ledger with itself must be a no-op.
+///
+/// It happens in practice: both models of a shared plan resolve to one record, so a restore that
+/// takes the record once per model hands the merge two identical copies. Deduplicating by neighbour
+/// alone is not enough for that - samples that share a timestamp are common in a burst, and they keep
+/// the copies apart - which silently doubled the money in the allowance.
+#[test]
+fn merging_a_ledger_with_itself_changes_nothing() {
+    use crate::state::{LocalLedger, Usage};
+
+    let mut l = LocalLedger::default();
+    // Two samples in the same second: exactly the case that defeats a neighbour-only dedupe.
+    l.add_usage(1_000, Usage { prompt: 1_000_000, cached: 0, completion: 0 }, 1.0);
+    l.add_usage(1_000, Usage { prompt: 2_000_000, cached: 0, completion: 0 }, 2.0);
+    l.add_usage(1_001, Usage { prompt: 3_000_000, cached: 0, completion: 0 }, 3.0);
+
+    let merged = LocalLedger::merge(vec![l.clone(), l.clone()]);
+    assert_eq!(merged.samples.len(), 3, "no sample is counted twice");
+    assert!((merged.total_cost - 6.0).abs() < 1e-9, "got {}", merged.total_cost);
+    assert_eq!(merged.total_tokens, 6_000_000);
+
+    // Twice as many copies is still one ledger.
+    let merged = LocalLedger::merge(vec![l.clone(), l.clone(), l.clone()]);
+    assert_eq!(merged.samples.len(), 3);
+    assert!((merged.total_cost - 6.0).abs() < 1e-9, "got {}", merged.total_cost);
+
+    // And a subset of the same records still merges to itself rather than adding anything.
+    let mut other = LocalLedger::default();
+    other.add_usage(1_002, Usage { prompt: 4_000_000, cached: 0, completion: 0 }, 4.0);
+    let merged = LocalLedger::merge(vec![l.clone(), other.clone(), l.clone()]);
+    assert_eq!(merged.samples.len(), 4);
+    assert!((merged.total_cost - 10.0).abs() < 1e-9, "got {}", merged.total_cost);
 }
 
