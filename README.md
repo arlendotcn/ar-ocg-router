@@ -69,6 +69,6 @@ The consequence is that clients should never care which account served a request
 
 ## Status
 
-Version 0.0.5. Provider behaviour in [Upstream notes](docs/upstream.md) reflects live API
+Version 0.0.6. Provider behaviour in [Upstream notes](docs/upstream.md) reflects live API
 verification on 2026-09-17; operational limits are in
 [Troubleshooting](docs/troubleshooting.md).
