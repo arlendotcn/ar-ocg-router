@@ -1,6 +1,6 @@
 //! Runtime state per account: statistics, quota ledger, cooldown, health.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -145,6 +145,12 @@ pub struct LedgerSample {
     pub prompt: u64,
     pub cached: u64,
     pub completion: u64,
+    /// What the same request would have cost on the cash endpoint, i.e. what a plan saved. Zero for
+    /// a cash endpoint (nothing was saved) and for samples written before this was recorded.
+    pub saved: f64,
+    /// Whether the client asked for a stream, kept because the daily history reports it and the
+    /// ledger is the only per-request record that survives a restart.
+    pub stream: bool,
 }
 
 /// The three token classes a request consumed, and the rates to price them with.
@@ -210,13 +216,13 @@ impl LocalLedger {
         // survives the in-memory window is written - see PERSISTED_SAMPLES for why dropping the
         // old ones is not an option.
         let keep = self.samples.len().min(PERSISTED_SAMPLES);
-        // [ts, cost, prompt, cached, completion], oldest first. `from_state_json` also reads the
-        // earlier shapes, so a file written by any previous version still loads.
+        // [ts, cost, prompt, cached, completion, saved, stream], oldest first. `from_state_json` also
+        // reads the earlier shapes, so a file written by any previous version still loads.
         let samples: Vec<Value> = self
             .samples
             .iter()
             .skip(self.samples.len() - keep)
-            .map(|s| json!([s.ts, s.cost, s.prompt, s.cached, s.completion]))
+            .map(|s| json!([s.ts, s.cost, s.prompt, s.cached, s.completion, s.saved, s.stream]))
             .collect();
         json!({
             "total_tokens": self.total_tokens,
@@ -248,7 +254,10 @@ impl LocalLedger {
                 //   [ts, cost, tokens]                             - money + a bare total
                 //   [ts, cost, tokens, prompt, cached, completion]  - money + the split
                 //   [ts, prompt, cached, completion]               - tokens only (a detour)
-                //   [ts, cost, prompt, cached, completion]         - the current form
+                //   [ts, cost, prompt, cached, completion]         - money + the split, no extras
+                //   [ts, cost, prompt, cached, completion, saved, stream] - the current form
+                //     (saved and stream were added later; the length says which shape this is, and
+                //      only the two newest lengths carry them)
                 // The money column is kept when the file has one: it is what the request actually
                 // cost at the rates then in force, and the allowance is measured in it. A file with
                 // no money column predates that guarantee, so its samples are priced at the current
@@ -277,6 +286,15 @@ impl LocalLedger {
                         t[3].as_u64().unwrap_or(0),
                         t[4].as_u64().unwrap_or(0),
                     ),
+                    // Lengths 7 and 8 are the current form: the five above plus what a plan saved
+                    // and whether the client streamed. Length 6 stays the older money+total shape,
+                    // which is why the extras start at 7 rather than being appended to it.
+                    7 | 8 => (
+                        t[1].as_f64().unwrap_or(0.0),
+                        t[2].as_u64().unwrap_or(0),
+                        t[3].as_u64().unwrap_or(0),
+                        t[4].as_u64().unwrap_or(0),
+                    ),
                     _ => {
                         let (p, c, o) = (
                             t[3].as_u64().unwrap_or(0),
@@ -291,7 +309,15 @@ impl LocalLedger {
                         (t[1].as_f64().unwrap_or(0.0), split.0, split.1, split.2)
                     }
                 };
-                l.samples.push_back(LedgerSample { ts, cost, prompt, cached, completion });
+                l.samples.push_back(LedgerSample {
+                    ts,
+                    cost,
+                    prompt,
+                    cached,
+                    completion,
+                    saved: t.get(5).and_then(|x| x.as_f64()).unwrap_or(0.0),
+                    stream: t.get(6).and_then(|x| x.as_bool()).unwrap_or(false),
+                });
             }
         }
         l
@@ -315,19 +341,30 @@ impl LocalLedger {
         }
     }
 
-    /// Record one request's token counts. Money is not an input: it is computed from these when
-    /// The cost is computed here, once, at the rates in force now, and stored with the tokens. That
-    /// is what makes a later rate change affect only later requests: the allowance this request
-    /// consumed is already spent and must not be recomputed under new prices.
+    /// Record one request's token counts and what they cost.
+    ///
+    /// The money is computed by the caller, once, at the rates in force at that moment, and stored
+    /// beside the tokens. That is what makes a later rate change affect only later requests: the
+    /// allowance this request consumed is already spent and must not be recomputed under new prices.
     pub fn add_usage(&mut self, now: i64, usage: Usage, cost: f64) {
-        self.samples.push_back(LedgerSample {
+        self.add_sample(LedgerSample {
             ts: now,
             cost,
             prompt: usage.prompt,
             cached: usage.cached,
             completion: usage.completion,
+            saved: 0.0,
+            stream: false,
         });
-        self.total_tokens += usage.total();
+    }
+
+    /// Record one request, including the two facts only the caller knows: what a plan saved, and
+    /// whether the client streamed. Both are carried into the daily history from here.
+    pub fn add_sample(&mut self, s: LedgerSample) {
+        let tokens = s.total_tokens();
+        let cost = s.cost;
+        self.samples.push_back(s);
+        self.total_tokens += tokens;
         self.total_cost += cost;
         // The in-memory cap and the persisted cap are the same number on purpose. If memory kept
         // more than the file accepts, a long-running process would answer from a longer history
@@ -335,6 +372,7 @@ impl LocalLedger {
         while self.samples.len() > PERSISTED_SAMPLES {
             self.samples.pop_front();
         }
+        let now = self.samples.back().map(|x| x.ts).unwrap_or(0);
         let cutoff = now - 31 * 86400;
         while let Some(s) = self.samples.front() {
             if s.ts < cutoff {
@@ -1254,22 +1292,37 @@ pub struct AccountRuntime {
     /// When the newest in-flight mark was taken (`in_flight` counter), so a leaked mark can be
     /// aged out instead of misread as a live request.
     pub in_flight_since: AtomicI64,
+    /// The router's daily history, shared by every runtime. Held here rather than passed in at each
+    /// call site so that a request is counted into the day at the same moment and from the same
+    /// numbers as the lifetime counters beside it.
+    pub history: Arc<Mutex<UsageHistory>>,
 }
 
 impl AccountRuntime {
     pub fn new(name: &str) -> AccountRuntime {
-        AccountRuntime::with_quota(name, String::new(), Arc::new(Mutex::new(QuotaState::default())))
+        AccountRuntime::with_quota(
+            name,
+            String::new(),
+            Arc::new(Mutex::new(QuotaState::default())),
+            Arc::new(Mutex::new(UsageHistory::default())),
+        )
     }
 
     /// Build a runtime bound to an existing allowance cell. Two endpoints given the same cell share
     /// everything the cell holds (readings, calibration, the token ledger) while keeping their own
     /// statistics, cooldowns and in-flight marks.
-    pub fn with_quota(name: &str, group: String, quota: Arc<Mutex<QuotaState>>) -> AccountRuntime {
+    pub fn with_quota(
+        name: &str,
+        group: String,
+        quota: Arc<Mutex<QuotaState>>,
+        history: Arc<Mutex<UsageHistory>>,
+    ) -> AccountRuntime {
         AccountRuntime {
             name: name.to_string(),
             stats: Mutex::new(AccountStats::default()),
             quota,
             group,
+            history,
             balance: Mutex::new(None),
             models: Mutex::new(None),
             cooldown_until: AtomicI64::new(0),
@@ -1505,6 +1558,23 @@ impl AccountRuntime {
             s.cost_usd += usage.cost_usd;
             s.saved_usd += usage.saved_usd;
         }
+        // The day is counted from the same numbers, at the same moment, as the lifetime counters,
+        // so the two cannot disagree about the same request.
+        if let Ok(mut h) = self.history.lock() {
+            h.record(
+                now,
+                &self.name,
+                &UsageBucket::success(
+                    usage.prompt_tokens,
+                    usage.cached_tokens,
+                    usage.completion_tokens,
+                    usage.cost_usd,
+                    usage.saved_usd,
+                    latency_ms,
+                    stream,
+                ),
+            );
+        }
         let tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
         if tokens > 0 {
             if let Ok(mut q) = self.quota.lock() {
@@ -1514,15 +1584,15 @@ impl AccountRuntime {
                 q.windows.roll(now);
                 // The cost is frozen here, at the rates in force for this request. A later rate
                 // change must not retroactively alter an allowance that has already been spent.
-                q.ledger.add_usage(
-                    now,
-                    Usage {
-                        prompt: usage.prompt_tokens,
-                        cached: usage.cached_tokens,
-                        completion: usage.completion_tokens,
-                    },
-                    usage.cost_usd,
-                );
+                q.ledger.add_sample(LedgerSample {
+                    ts: now,
+                    cost: usage.cost_usd,
+                    saved: usage.saved_usd,
+                    prompt: usage.prompt_tokens,
+                    cached: usage.cached_tokens,
+                    completion: usage.completion_tokens,
+                    stream,
+                });
             }
         }
     }
@@ -1535,6 +1605,11 @@ impl AccountRuntime {
             s.last_status = status;
             s.latency_ms_total += latency_ms;
             s.last_error = Some(format!("HTTP {} {}", status, crate::util::truncate(msg, 300)));
+        }
+        // A failed attempt is a request that happened, so it belongs to the day even though it
+        // consumed nothing.
+        if let Ok(mut h) = self.history.lock() {
+            h.record(now, &self.name, &UsageBucket::error(latency_ms));
         }
     }
 
@@ -1620,11 +1695,49 @@ pub struct Registry {
     map: Mutex<HashMap<String, Arc<AccountRuntime>>>,
     /// Allowance groups: group id -> the shared quota cell. See `get_or_create_in_group`.
     groups: Mutex<HashMap<String, Arc<Mutex<QuotaState>>>>,
+    /// The router's daily history. One instance, shared with every endpoint runtime, because a
+    /// day is a fact about the router rather than about one endpoint.
+    history: Arc<Mutex<UsageHistory>>,
 }
 
 impl Registry {
     pub fn new() -> Registry {
-        Registry { map: Mutex::new(HashMap::new()), groups: Mutex::new(HashMap::new()) }
+        Registry {
+            map: Mutex::new(HashMap::new()),
+            groups: Mutex::new(HashMap::new()),
+            history: Arc::new(Mutex::new(UsageHistory::default())),
+        }
+    }
+
+    /// The shared daily history.
+    pub fn history(&self) -> Arc<Mutex<UsageHistory>> {
+        self.history.clone()
+    }
+
+    /// Adopt the stored daily history, then fill in whatever the sample ledger still remembers.
+    ///
+    /// The stored buckets win: backfill fills days that have nothing, so a restart can neither
+    /// double-count nor overwrite. Samples matter because a file written before this structure
+    /// existed has no history at all - and they cover at most the last 31 days, so the history
+    /// starts there rather than pretending otherwise.
+    pub fn restore_history(
+        &self,
+        saved: &UsageHistory,
+        ledgers: &HashMap<String, LocalLedger>,
+        now: i64,
+    ) {
+        if let Ok(mut h) = self.history.lock() {
+            // The config decides the boundary, not the file: a boundary that was wrong must be
+            // correctable, and the stored value only survives until the next load.
+            let (offset, retention) = (h.offset_minutes(), h.retention_days());
+            *h = saved.clone();
+            h.set_policy(offset, retention);
+            for l in ledgers.values() {
+                let samples: Vec<LedgerSample> = l.samples.iter().copied().collect();
+                h.backfill(&samples);
+            }
+            h.prune(now);
+        }
     }
 
     /// Create (or fetch) an endpoint runtime, sharing an allowance with any endpoint already in
@@ -1653,7 +1766,12 @@ impl Registry {
                 .or_insert_with(|| Arc::new(Mutex::new(QuotaState::default())))
                 .clone()
         };
-        let rt = Arc::new(AccountRuntime::with_quota(name, group.to_string(), cell));
+        let rt = Arc::new(AccountRuntime::with_quota(
+            name,
+            group.to_string(),
+            cell,
+            self.history.clone(),
+        ));
         m.insert(name.to_string(), rt.clone());
         rt
     }
@@ -1952,3 +2070,436 @@ impl Account {
         self.cfg.kind
     }
 }
+
+
+// ------------------------------------------------------------------- usage history
+//
+// The counters beside each endpoint answer "how much, ever". The quota windows answer "how much,
+// right now". Neither answers "what did last Tuesday cost", which is the question an operator asks
+// when a bill arrives - and the sample ledger cannot answer it either: it is capped in count and
+// pruned at 31 days, so it is the wrong place to keep a year of history.
+//
+// One bucket per (day, endpoint), summed from the same values the lifetime counters use, with the
+// week and the month folded out of it when read. A day is a *local* day: the boundary that matters
+// to the person reading a bill is midnight where they are, not midnight UTC.
+
+/// The counters for one endpoint inside one day.
+///
+/// The same fields as `AccountStats` minus the ones that describe a moment rather than an interval
+/// ("last used", "last error"), so a day can be placed beside a total without translating anything.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct UsageBucket {
+    pub requests: u64,
+    pub successes: u64,
+    pub errors: u64,
+    pub stream_requests: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cached_tokens: u64,
+    /// Money actually spent on this traffic, frozen at the rates in force for each request.
+    pub cost: f64,
+    /// What the same traffic would have cost on the cash endpoint, i.e. what a plan saved.
+    pub saved: f64,
+    pub latency_ms_total: u64,
+}
+
+impl UsageBucket {
+    pub fn success(
+        prompt: u64,
+        cached: u64,
+        completion: u64,
+        cost: f64,
+        saved: f64,
+        latency_ms: u64,
+        stream: bool,
+    ) -> UsageBucket {
+        UsageBucket {
+            requests: 1,
+            successes: 1,
+            errors: 0,
+            stream_requests: u64::from(stream),
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            cached_tokens: cached,
+            cost,
+            saved,
+            latency_ms_total: latency_ms,
+        }
+    }
+
+    pub fn error(latency_ms: u64) -> UsageBucket {
+        UsageBucket {
+            requests: 1,
+            errors: 1,
+            latency_ms_total: latency_ms,
+            ..UsageBucket::default()
+        }
+    }
+
+    pub fn add(&mut self, other: &UsageBucket) {
+        self.requests += other.requests;
+        self.successes += other.successes;
+        self.errors += other.errors;
+        self.stream_requests += other.stream_requests;
+        self.prompt_tokens += other.prompt_tokens;
+        self.completion_tokens += other.completion_tokens;
+        self.cached_tokens += other.cached_tokens;
+        self.cost += other.cost;
+        self.saved += other.saved;
+        self.latency_ms_total += other.latency_ms_total;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == UsageBucket::default()
+    }
+
+    pub fn total_tokens(&self) -> u64 {
+        self.prompt_tokens.saturating_add(self.completion_tokens)
+    }
+
+    /// Written sparsely: a field that is zero is left out, which keeps a year of quiet days small.
+    pub fn to_json(&self) -> Value {
+        let mut m = serde_json::Map::new();
+        let mut n = |k: &str, v: u64| {
+            if v != 0 {
+                m.insert(k.to_string(), json!(v));
+            }
+        };
+        n("requests", self.requests);
+        n("successes", self.successes);
+        n("errors", self.errors);
+        n("stream_requests", self.stream_requests);
+        n("prompt_tokens", self.prompt_tokens);
+        n("completion_tokens", self.completion_tokens);
+        n("cached_tokens", self.cached_tokens);
+        n("latency_ms_total", self.latency_ms_total);
+        if self.cost != 0.0 {
+            m.insert("cost".to_string(), json!(self.cost));
+        }
+        if self.saved != 0.0 {
+            m.insert("saved".to_string(), json!(self.saved));
+        }
+        Value::Object(m)
+    }
+
+    pub fn from_json(v: &Value) -> UsageBucket {
+        let o = match v.as_object() {
+            Some(o) => o,
+            None => return UsageBucket::default(),
+        };
+        let u = |k: &str| o.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        let f = |k: &str| o.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
+        UsageBucket {
+            requests: u("requests"),
+            successes: u("successes"),
+            errors: u("errors"),
+            stream_requests: u("stream_requests"),
+            prompt_tokens: u("prompt_tokens"),
+            completion_tokens: u("completion_tokens"),
+            cached_tokens: u("cached_tokens"),
+            cost: f("cost"),
+            saved: f("saved"),
+            latency_ms_total: u("latency_ms_total"),
+        }
+    }
+}
+
+/// One day of history: everything, plus the split by endpoint.
+///
+/// Both are kept, and the total is authoritative. Folding the total out of the endpoints would make
+/// deleting an endpoint quietly rewrite the past, since its days would stop being counted.
+#[derive(Debug, Default, Clone)]
+pub struct UsageDay {
+    pub total: UsageBucket,
+    pub by_account: BTreeMap<String, UsageBucket>,
+    /// True when this day's total was rebuilt from the sample ledger rather than counted as it
+    /// happened. Such a day has no per-endpoint split - an allowance's samples do not record which
+    /// of its models served a request - and the console says so instead of leaving a silent gap.
+    pub backfilled: bool,
+}
+
+/// Day buckets, oldest first, keyed `YYYY-MM-DD` in local time.
+#[derive(Debug, Clone)]
+pub struct UsageHistory {
+    days: BTreeMap<String, UsageDay>,
+    offset_minutes: i32,
+    retention_days: u32,
+    /// The local day retention was last applied on. Not persisted: after a restart the first flush
+    /// should look at the window once, and a stale key from the file would only stop it from doing so.
+    pruned_on: String,
+}
+
+impl Default for UsageHistory {
+    fn default() -> Self {
+        UsageHistory::new(0, 400)
+    }
+}
+
+impl UsageHistory {
+    pub fn new(offset_minutes: i32, retention_days: u32) -> UsageHistory {
+        UsageHistory {
+            days: BTreeMap::new(),
+            offset_minutes,
+            retention_days: retention_days.clamp(1, 3650),
+            pruned_on: String::new(),
+        }
+    }
+
+    pub fn offset_minutes(&self) -> i32 {
+        self.offset_minutes
+    }
+
+    pub fn retention_days(&self) -> u32 {
+        self.retention_days
+    }
+
+    /// Adopt a new boundary or retention. Days already counted keep their key: moving the boundary
+    /// under history that has already been filed would relabel it rather than re-file it.
+    pub fn set_policy(&mut self, offset_minutes: i32, retention_days: u32) {
+        self.offset_minutes = offset_minutes;
+        self.retention_days = retention_days.clamp(1, 3650);
+    }
+
+    /// The day index (days since 1970-01-01) and the key of a moment, in local time.
+    fn local_day(ts: i64, offset_minutes: i32) -> i64 {
+        (ts + offset_minutes as i64 * 60).div_euclid(86_400)
+    }
+
+    fn key_of(days: i64) -> String {
+        let (y, m, d) = timeutil::civil_from_days(days);
+        format!("{:04}-{:02}-{:02}", y, m, d)
+    }
+
+    /// The `YYYY-MM-DD` a moment falls in, as the console and the buckets both read it.
+    pub fn day_key(ts: i64, offset_minutes: i32) -> String {
+        Self::key_of(Self::local_day(ts, offset_minutes))
+    }
+
+    /// Count one finished request. `delta` carries the same numbers the lifetime counters take, so
+    /// the two cannot drift: they are incremented from one place, at one moment.
+    pub fn record(&mut self, now: i64, account: &str, delta: &UsageBucket) {
+        if delta.is_empty() {
+            return;
+        }
+        let key = Self::day_key(now, self.offset_minutes);
+        let day = self.days.entry(key).or_default();
+        day.total.add(delta);
+        if !account.is_empty() {
+            day.by_account.entry(account.to_string()).or_default().add(delta);
+        }
+    }
+
+    /// Drop days that have fallen out of the retention window.
+    ///
+    /// Called on every flush, so it checks first that the local day has actually moved: nothing can
+    /// fall out of a window that has not reached its next boundary.
+    pub fn prune(&mut self, now: i64) {
+        let today = Self::key_of(Self::local_day(now, self.offset_minutes));
+        if self.pruned_on == today {
+            return;
+        }
+        self.pruned_on = today;
+        let oldest = Self::key_of(Self::local_day(now, self.offset_minutes) - self.retention_days as i64);
+        let before = self.days.len();
+        self.days.retain(|k, _| k.as_str() >= oldest.as_str());
+        if self.days.len() != before {
+            // Kept in the log because a retention mistake shows up as missing history, which is
+            // otherwise indistinguishable from "nothing was routed that day".
+            crate::log_info!(
+                "usage history pruned: {} day(s) older than {} dropped",
+                before - self.days.len(),
+                oldest
+            );
+        }
+    }
+
+    /// Sum a closed range of local days, inclusive. Missing days contribute nothing.
+    pub fn fold(&self, from_day: i64, to_day: i64) -> UsageBucket {
+        let mut out = UsageBucket::default();
+        let mut d = from_day;
+        while d <= to_day {
+            if let Some(day) = self.days.get(&Self::key_of(d)) {
+                out.add(&day.total);
+            }
+            d += 1;
+        }
+        out
+    }
+
+    /// The same range, but summing only one endpoint's share of it.
+    fn fold_account(&self, from_day: i64, to_day: i64, account: &str) -> UsageBucket {
+        let mut out = UsageBucket::default();
+        let mut d = from_day;
+        while d <= to_day {
+            if let Some(day) = self.days.get(&Self::key_of(d)) {
+                if let Some(b) = day.by_account.get(account) {
+                    out.add(b);
+                }
+            }
+            d += 1;
+        }
+        out
+    }
+
+    /// Rebuild day totals from the sample ledger: the only record that predates this structure.
+    ///
+    /// A day that already has history is left alone, so this is safe to run at every startup and
+    /// cannot double-count. Only the total can be rebuilt - see `UsageDay::backfilled`.
+    pub fn backfill(&mut self, samples: &[LedgerSample]) {
+        // Accumulated aside first, not day by day as the samples are walked: writing straight into
+        // `days` would make the *second* sample of a day look like a day that already had history,
+        // and it would be skipped.
+        let mut by_day: BTreeMap<String, UsageBucket> = BTreeMap::new();
+        for s in samples {
+            let key = Self::day_key(s.ts, self.offset_minutes);
+            if self.days.contains_key(&key) {
+                continue;
+            }
+            let day = by_day.entry(key).or_default();
+            day.requests += 1;
+            day.successes += 1;
+            day.prompt_tokens += s.prompt;
+            day.cached_tokens += s.cached;
+            day.completion_tokens += s.completion;
+            day.cost += s.cost;
+            day.saved += s.saved;
+            if s.stream {
+                day.stream_requests += 1;
+            }
+        }
+        let added = by_day.len();
+        for (key, bucket) in by_day {
+            let day = self.days.entry(key).or_default();
+            day.total.add(&bucket);
+            day.backfilled = true;
+        }
+        if added > 0 {
+            crate::log_info!("usage history backfilled {} sample(s) from the ledger", added);
+        }
+    }
+
+    /// The buckets the console shows first: today, this week, this month - each with the same span
+    /// of the period before it, because "this week" compared against a *whole* last week is not a
+    /// comparison anyone can read anything from.
+    pub fn totals(&self, now: i64) -> Value {
+        let today = Self::local_day(now, self.offset_minutes);
+        let weekday = (today + 3).rem_euclid(7); // 0 = Monday
+        let week_start = today - weekday;
+        let (y, m, _) = timeutil::civil_from_days(today);
+        let month_start = timeutil::days_from_civil(y, m, 1);
+        let (py, pm) = if m == 1 { (y - 1, 12) } else { (y, m - 1) };
+        let prev_month_start = timeutil::days_from_civil(py, pm, 1);
+        let month_len = timeutil::days_in_month(py, pm) as i64;
+        let elapsed = today - month_start; // 0-based day of the month
+        let prev_month_end = prev_month_start + elapsed.min(month_len - 1);
+
+        let mut o = serde_json::Map::new();
+        o.insert("today".into(), self.fold(today, today).to_json());
+        o.insert("yesterday".into(), self.fold(today - 1, today - 1).to_json());
+        o.insert("week".into(), self.fold(week_start, today).to_json());
+        o.insert("week_prev".into(), self.fold(week_start - 7, today - 7).to_json());
+        o.insert("month".into(), self.fold(month_start, today).to_json());
+        o.insert("month_prev".into(), self.fold(prev_month_start, prev_month_end).to_json());
+        o.insert("last_7_days".into(), self.fold(today - 6, today).to_json());
+        o.insert("last_30_days".into(), self.fold(today - 29, today).to_json());
+        o.insert("first_day".into(), json!(self.days.keys().next().cloned().unwrap_or_default()));
+        Value::Object(o)
+    }
+
+    /// Per-endpoint totals for the same three periods: the rows of the breakdown table.
+    pub fn account_totals(&self, now: i64) -> Value {
+        let today = Self::local_day(now, self.offset_minutes);
+        let week_start = today - (today + 3).rem_euclid(7);
+        let (y, m, _) = timeutil::civil_from_days(today);
+        let month_start = timeutil::days_from_civil(y, m, 1);
+        let mut names: Vec<String> = Vec::new();
+        for day in self.days.values() {
+            for k in day.by_account.keys() {
+                if !names.contains(k) {
+                    names.push(k.clone());
+                }
+            }
+        }
+        names.sort();
+        let mut out = serde_json::Map::new();
+        for name in names {
+            let mut e = serde_json::Map::new();
+            e.insert("today".into(), self.fold_account(today, today, &name).to_json());
+            e.insert("week".into(), self.fold_account(week_start, today, &name).to_json());
+            e.insert("month".into(), self.fold_account(month_start, today, &name).to_json());
+            out.insert(name, Value::Object(e));
+        }
+        Value::Object(out)
+    }
+
+    /// The last `days` local days, oldest first and **including the empty ones**: a chart with the
+    /// quiet days missing draws a straight line through a week of nothing.
+    pub fn recent(&self, now: i64, days: i64, account: Option<&str>) -> Value {
+        let today = Self::local_day(now, self.offset_minutes);
+        let first = today - (days.max(1) - 1);
+        let mut out = Vec::new();
+        let mut d = first;
+        while d <= today {
+            let key = Self::key_of(d);
+            let day = self.days.get(&key);
+            let bucket = match (day, account) {
+                (Some(day), Some(name)) => day.by_account.get(name).cloned().unwrap_or_default(),
+                (Some(day), None) => day.total.clone(),
+                (None, _) => UsageBucket::default(),
+            };
+            out.push(json!({
+                "date": key,
+                "backfilled": day.map(|d| d.backfilled).unwrap_or(false),
+                "bucket": bucket.to_json(),
+            }));
+            d += 1;
+        }
+        json!(out)
+    }
+
+    /// Spans from the first recorded day to today, so the console can say how far back it goes.
+    pub fn to_json(&self) -> Value {
+        let mut days = serde_json::Map::new();
+        for (k, d) in &self.days {
+            let mut o = serde_json::Map::new();
+            o.insert("total".into(), d.total.to_json());
+            if !d.by_account.is_empty() {
+                let mut by = serde_json::Map::new();
+                for (name, b) in &d.by_account {
+                    by.insert(name.clone(), b.to_json());
+                }
+                o.insert("by_account".into(), Value::Object(by));
+            }
+            if d.backfilled {
+                o.insert("backfilled".into(), json!(true));
+            }
+            days.insert(k.clone(), Value::Object(o));
+        }
+        json!({
+            "offset_minutes": self.offset_minutes,
+            "retention_days": self.retention_days,
+            "days": Value::Object(days),
+        })
+    }
+
+    pub fn from_json(v: &Value) -> UsageHistory {
+        let offset = v.get("offset_minutes").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
+        let retention = v.get("retention_days").and_then(|x| x.as_u64()).unwrap_or(400) as u32;
+        let mut h = UsageHistory::new(offset, retention);
+        if let Some(days) = v.get("days").and_then(|x| x.as_object()) {
+            for (k, dv) in days {
+                let mut day = UsageDay::default();
+                day.total = UsageBucket::from_json(dv.get("total").unwrap_or(&Value::Null));
+                if let Some(by) = dv.get("by_account").and_then(|x| x.as_object()) {
+                    for (name, b) in by {
+                        day.by_account.insert(name.clone(), UsageBucket::from_json(b));
+                    }
+                }
+                day.backfilled = dv.get("backfilled").and_then(|x| x.as_bool()).unwrap_or(false);
+                h.days.insert(k.clone(), day);
+            }
+        }
+        h
+    }
+}
+

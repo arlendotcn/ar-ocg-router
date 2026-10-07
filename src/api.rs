@@ -271,6 +271,12 @@ fn config_json(cfg: &Config, state: &Arc<AppState>) -> Value {
             "quiet": cfg.log.quiet,
         },
         "router": router_json(cfg),
+        "stats": {
+            // null means unset, which is what the console checks before offering to fill it in from
+            // the browser: the server cannot read the machine's zone without a timezone database.
+            "utc_offset_minutes": cfg.stats.utc_offset_minutes,
+            "retention_days": cfg.stats.retention_days,
+        },
         "compat": {
             "developer_role_to_system": cfg.compat.developer_role_to_system,
             "max_completion_tokens_to_max_tokens": cfg.compat.max_completion_tokens_to_max_tokens,
@@ -386,6 +392,28 @@ fn doc_to_yaml(doc: &Value, existing: &Config) -> Result<String, String> {
     if bool_at(log, "dump_error_request").unwrap_or(existing.log.dump_error_request) {
         out.push_str("  dump_error_request: true\n");
     }
+
+    out.push_str("\nstats:\n");
+    // Three cases, and the difference matters: the document carries a number (the console set it),
+    // carries null (the console cleared it), or does not mention it at all (a partial save, in which
+    // case the live value is carried through rather than dropped).
+    let stats_doc = doc.get("stats");
+    let offset = match stats_doc.and_then(|s| s.get("utc_offset_minutes")) {
+        Some(Value::Null) => None,
+        Some(v) => v
+            .as_i64()
+            .or(existing.stats.utc_offset_minutes.map(|x| x as i64)),
+        None => existing.stats.utc_offset_minutes.map(|x| x as i64),
+    };
+    if let Some(v) = offset {
+        out.push_str(&format!("  utc_offset_minutes: {}\n", v.clamp(-1080, 1080)));
+    }
+    let retention = stats_doc
+        .and_then(|s| s.get("retention_days"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(existing.stats.retention_days as i64)
+        .clamp(1, 3650);
+    out.push_str(&format!("  retention_days: {}\n", retention));
 
     out.push_str("\nrouter:\n");
     out.push_str(&format!("  mode: {}\n", yaml_str(str_at(router, "mode").unwrap_or("auto"))));

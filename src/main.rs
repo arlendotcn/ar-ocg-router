@@ -325,6 +325,11 @@ fn main() {
             },
             peak,
         );
+        // The stored buckets are the history; the sample ledger is the only record of days that
+        // were counted before they existed, so those are reconstructed here once.
+        state
+            .registry
+            .restore_history(&saved.history, &saved.ledgers, crate::util::now_secs());
         // write once at startup so the file exists (and is known-good) even before any failure
         persist::write(&state);
     }

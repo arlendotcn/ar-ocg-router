@@ -278,6 +278,8 @@ export type ConfigDoc = {
   server: ServerCfg;
   log: LogCfg;
   router: RouterCfg;
+  /** `utc_offset_minutes: null` means unset, which the router files as UTC and warns about once. */
+  stats?: { utc_offset_minutes: number | null; retention_days: number };
   compat: CompatCfg;
   endpoints: EndpointCfg[];
   warnings: string[];
@@ -331,3 +333,36 @@ export type ModelLibrary = {
   version: number;
   models: ModelEntry[];
 };
+
+/** One day's counters, or one endpoint's share of it. Sparse: a zero field is not written. */
+export type HistoryBucket = {
+  requests?: number;
+  successes?: number;
+  errors?: number;
+  stream_requests?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cached_tokens?: number;
+  cost?: number;
+  saved?: number;
+  latency_ms_total?: number;
+};
+
+export type HistoryDay = {
+  /** Local date, YYYY-MM-DD, in the offset the router files by. */
+  date: string;
+  /** True when the day's total was rebuilt from the sample ledger, so it has no endpoint split. */
+  backfilled?: boolean;
+  bucket: HistoryBucket;
+};
+
+export type History = {
+  /** Minutes east of UTC the router files days by; 0 when stats.utc_offset_minutes is unset. */
+  offset_minutes: number;
+  retention_days: number;
+  today: string;
+  days: HistoryDay[];
+  totals: Record<string, HistoryBucket>;
+  accounts: Record<string, Record<string, HistoryBucket>>;
+};
+

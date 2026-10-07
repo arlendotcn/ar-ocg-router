@@ -45,6 +45,8 @@ pub struct Persisted {
     /// Per-endpoint quota-calibration flows (a pending reading and/or a derivation), plus the
     /// bucket anchors copied from the provider's console.
     pub calibrations: HashMap<String, crate::state::CalibrationEntry>,
+    /// Daily usage history, day buckets keyed by local date.
+    pub history: crate::state::UsageHistory,
     /// When the statistics counters started accumulating (unix seconds).
     ///
     /// The counters are lifetime totals that survive restarts, while the uptime shown next to them
@@ -101,6 +103,10 @@ pub fn load(path: &Path) -> Persisted {
             .get("counters")
             .and_then(crate::httpd::StaticsSnapshot::from_json);
         let stats_since = v.get("stats_since").and_then(|x| x.as_i64()).unwrap_or(0);
+        let history = v
+            .get("history")
+            .map(crate::state::UsageHistory::from_json)
+            .unwrap_or_default();
         let mut calibrations = HashMap::new();
         if let Some(xs) = v.get("calibrations").and_then(|x| x.as_object()) {
             for (name, c) in xs {
@@ -118,7 +124,7 @@ pub fn load(path: &Path) -> Persisted {
                 }
             }
         }
-        Some(Persisted { health, stats, ledgers, counters, stats_since, calibrations })
+        Some(Persisted { health, stats, ledgers, counters, stats_since, calibrations, history })
     };
     match parse(&text) {
         Some(p) => {
@@ -184,6 +190,9 @@ pub fn save(path: &Path, data: &Persisted, now: i64) -> Result<(), String> {
     obj.insert("endpoints".to_string(), Value::Object(endpoints));
     obj.insert("stats".to_string(), Value::Object(stats));
     obj.insert("ledgers".to_string(), Value::Object(ledgers));
+    // Daily history is written whole: it is one small object per day, and a partial history would
+    // be worse than none - a missing day is indistinguishable from a day with no traffic.
+    obj.insert("history".to_string(), data.history.to_json());
     obj.insert(
         "counters".to_string(),
         data.counters.map(|c| c.to_json()).unwrap_or(Value::Null),
@@ -245,6 +254,12 @@ pub fn snapshot(state: &Arc<crate::proxy::AppState>) -> Persisted {
         },
         stats_since: state.stats_since.load(Ordering::Relaxed),
         calibrations: crate::state::calibration_snapshot(state),
+        history: state
+            .registry
+            .history()
+            .lock()
+            .map(|h| h.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -312,8 +327,14 @@ pub fn flush_now(state: &Arc<crate::proxy::AppState>) {
 pub fn write(state: &Arc<crate::proxy::AppState>) {
     let cfg = state.cfg();
     let path = state_path(&cfg.path);
+    let now = crate::util::now_secs();
+    // Retention is enforced here rather than on a timer of its own: this is already the moment the
+    // history is written, and `prune` is a no-op until the local day actually changes.
+    if let Ok(mut h) = state.registry.history().lock() {
+        h.prune(now);
+    }
     let data = snapshot(state);
-    if let Err(e) = save(&path, &data, crate::util::now_secs()) {
+    if let Err(e) = save(&path, &data, now) {
         crate::log_warn!("cannot persist {}: {}", path.display(), e);
     }
 }

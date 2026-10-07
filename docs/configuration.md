@@ -305,6 +305,38 @@ change often and does not report a cost per request, so fill those in from your 
 | `inject_stream_usage` | false | Add `stream_options.include_usage` to streaming chat requests. |
 | `quota_refresh_secs` | 60 | Background quota poll interval (an endpoint's own value overrides it). |
 
+## Usage history
+
+Each finished request is added to a **daily bucket** (per endpoint, plus the day's total) from the same
+numbers the lifetime counters take, at the same moment. Weeks and months are not stored: they are
+folded out of the days when read, so the three views cannot disagree about the same Tuesday.
+
+```yaml
+stats:
+  utc_offset_minutes: 480   # the day boundary; omit for UTC
+  retention_days: 400
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `stats.utc_offset_minutes` | unset (UTC) | Minutes east of UTC that decides which day a request belongs to. The boundary that matters to the person reading a bill is midnight where they are, so a machine in UTC+8 that leaves this unset files everything after 08:00 local on the next date. It is configured rather than detected because the router has no timezone database: the console offers a one-click "use this browser's offset" instead, and an unset value is said once in the log rather than assumed. Changing it affects days filed from then on; days already filed are never reshuffled. |
+| `stats.retention_days` | 400 | Days kept. Buckets are small and written sparsely (a zero field is left out), so this is measured in years rather than kilobytes. |
+
+Two things this is honest about:
+
+- **It starts when it starts.** A state file written before this existed has no history, so the
+  router replays whatever the sample ledger still holds - at most 31 days and 20 000 requests. Such
+  a day is marked `backfilled` and carries a total with no per-endpoint split, because an
+  allowance's samples do not record which of its models served a request.
+- **Money is not summed across endpoints.** Several plans can be denominated in different currencies,
+  and their sum would be a number in no currency at all. The aggregate shows requests and tokens;
+  each endpoint's money is shown in its own unit. `saved` (what a plan saved against the cash
+  endpoint) is recorded per request from this version on.
+
+Read it from `GET /router/history?days=30[&account=name]`. It is deliberately **not** part of
+`/router/stats`, which the console polls every two seconds: a day bucket changes when a request is
+served, not while you watch.
+
 ## Compatibility layer
 
 Zero rewriting by default: apart from `model`, the request body is forwarded verbatim and

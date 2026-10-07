@@ -1,6 +1,6 @@
 "use client";
 
-import type { ConfigDoc, EndpointCfg, EndpointModels, ModelLibrary, PlanPreview, Stats, TestResult } from "@/types/api";
+import type { ConfigDoc, EndpointCfg, EndpointModels, History, ModelLibrary, PlanPreview, Stats, TestResult } from "@/types/api";
 
 /** The console is served by the router itself, so every call is same-origin and relative. */
 const BASE = "";
@@ -78,6 +78,10 @@ export const api = {
     return { changed: true, stats: (res.json ?? {}) as Stats, etag: res.etag };
   },
   config: () => call<ConfigDoc>("GET", "/api/config"),
+
+  /** Daily history. Separate from `stats` because it is calendar data: fetched rarely, not polled. */
+  history: (days: number, account?: string) =>
+    call<History>("GET", `/router/history?days=${days}${account ? `&account=${encodeURIComponent(account)}` : ""}`),
   rawConfig: () => call<{ path: string; text: string }>("GET", "/api/config/raw"),
 
   saveConfig: (doc: ConfigDoc) =>

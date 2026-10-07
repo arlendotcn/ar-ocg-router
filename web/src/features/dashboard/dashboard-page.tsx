@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Meter } from "@/components/ui/meter";
 import { Plate, PlateBlock, Readout } from "@/components/ui/plate";
 import { PageHeader } from "@/components/page-header";
+import { HistoryBlock } from "./history-block";
 
 import { fmtBytes, fmtAgo, fmtDuration, fmtMoney, fmtNum, fmtPct, fmtWhen, moneySymbol } from "@/lib/format";
 import type { Account } from "@/types/api";
@@ -265,6 +266,11 @@ export function DashboardPage() {
           />
         </Plate>
       </div>
+
+      {/* ---- daily history: what the counters above cannot say, which is *when* ---- */}
+      <HistoryBlock
+        accounts={(stats?.accounts ?? []).map((a) => ({ name: a.name, currency: a.stats.currency }))}
+      />
 
       {/* ---- per side summary ---- */}
       <div className="grid gap-3 sm:grid-cols-2">

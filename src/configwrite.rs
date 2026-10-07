@@ -14,6 +14,7 @@ use std::path::Path;
 use serde_yaml::{Mapping, Value as Y};
 
 use crate::config::{
+    StatsCfg,
     AccountCfg, AccountKind, CompatCfg, Config, IdlePrefer, LogCfg, QuotaCfg, RouterCfg,
     RouterMode, Rule, ServerCfg,
 };
@@ -217,6 +218,17 @@ fn log_yaml(l: &LogCfg) -> Y {
     Y::Mapping(m)
 }
 
+fn stats_yaml(s: &StatsCfg) -> Y {
+    let mut m = Mapping::new();
+    // Absent means unset, and unset means UTC with a warning: writing `auto` would promise a
+    // detection the router cannot do.
+    if let Some(off) = s.utc_offset_minutes {
+        m.insert(ystr("utc_offset_minutes"), Y::Number(serde_yaml::Number::from(off as i64)));
+    }
+    m.insert(ystr("retention_days"), yu64(s.retention_days as u64));
+    Y::Mapping(m)
+}
+
 fn router_yaml(r: &RouterCfg) -> Y {
     ymap(vec![
         ("mode", ystr(router_mode_str(r.mode))),
@@ -268,6 +280,7 @@ pub fn build_doc(cfg: &Config, header: &str) -> ConfigDoc {
     root.insert(ystr("server"), server_yaml(&cfg.server));
     root.insert(ystr("log"), log_yaml(&cfg.log));
     root.insert(ystr("router"), router_yaml(&cfg.router));
+    root.insert(ystr("stats"), stats_yaml(&cfg.stats));
     root.insert(ystr("compat"), compat_yaml(&cfg.compat));
     root.insert(
         ystr("plans"),
@@ -728,7 +741,7 @@ fallback:
             .keys()
             .map(|k| k.as_str().unwrap().to_string())
             .collect();
-        assert_eq!(keys, vec!["server", "log", "router", "compat", "plans", "fallback"]);
+        assert_eq!(keys, vec!["server", "log", "router", "stats", "compat", "plans", "fallback"]);
     }
 
     #[test]

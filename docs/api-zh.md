@@ -36,6 +36,7 @@
 | `GET /router/banner` | 纯文本横幅，供脚本使用 |
 | `GET /health` | 存活探针，永不需要密钥 |
 | `GET /router/stats` | 全量 JSON：忙闲状态、计数器、各端点健康、额度三窗口、余额、token 与费用 |
+| `GET /router/history?days=30[&account=名字]` | 按天用量历史：`days[]`（由旧到新，空闲日也在，桶为空）、`totals`（今日/本周/本月，各带"上期同期"）、`accounts`（每个端点的同样三个周期）。`utc_offset_minutes` 说明日期是按哪个日界切的 |
 | `GET /router/schedule` | 未来若干次忙闲切换 |
 | `POST /router/reload` | 立即重载配置（同时每 3 秒自动检测） |
 | `GET /api/config` | 供控制台编辑的配置（密钥已打码） |

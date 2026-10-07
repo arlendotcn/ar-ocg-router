@@ -2243,7 +2243,16 @@ fn statistics_survive_a_restart_until_they_are_reset() {
     );
     let sample = &ledger["samples"][0];
     let fields = sample.as_array().expect("a sample is an array");
-    assert_eq!(fields.len(), 5, "a sample is [ts, cost, prompt, cached, completion]: {sample}");
+    assert_eq!(
+        fields.len(),
+        7,
+        "a sample is [ts, cost, prompt, cached, completion, saved, stream]: {sample}"
+    );
+    assert_eq!(fields[6].as_bool(), Some(false), "this request did not stream: {sample}");
+    assert!(
+        fields[5].as_f64().is_some(),
+        "what a plan saved is recorded beside the cost: {sample}"
+    );
     assert!(
         fields[1].as_f64().unwrap_or(0.0) > 0.0,
         "the sample records what the request cost: {sample}"
@@ -2699,4 +2708,73 @@ fn a_transient_rate_limit_retries_the_same_endpoint() {
         .clone();
     assert_eq!(go_acc["available"], true, "go-1 should not be cooling down: {}", go_acc);
 }
+
+
+/// The daily history is a second view of the same requests: everything the counters see, filed by
+/// day, reachable without touching them.
+#[test]
+fn daily_history_reports_what_the_counters_report() {
+    let go = Mock::start();
+    // `config_plans_only` appends the /v1 itself, so the mock url goes in bare.
+    let r = start_router("history", "2026-09-16T02:00:00Z", &|port| config_plans_only(port, &go.url()));
+
+    // One request served, one refused: both are requests that happened.
+    let ok = request(r.port, "POST", "/v1/chat/completions", Some(CHAT_BODY), &[]);
+    assert_eq!(ok.status, 200);
+    go.set(
+        "/v1/chat/completions",
+        MockResponse::json(400, r#"{"error":{"message":"no such parameter"}}"#),
+    );
+    let bad = request(r.port, "POST", "/v1/chat/completions", Some(CHAT_BODY), &[]);
+    assert_eq!(bad.status, 400, "a client error is returned, and still counted as a request");
+
+    let h = request(r.port, "GET", "/router/history?days=3", None, &[]);
+    if h.status != 200 {
+        dump_log(&r);
+    }
+    assert_eq!(h.status, 200);
+    let v = h.json();
+    let days = v["days"].as_array().expect("days");
+    assert_eq!(days.len(), 3, "three days, the quiet ones included: {}", v);
+    // The clock is faked, so "today" is the same in every run - and with no offset configured the
+    // day is a UTC day, which is what the startup notice tells the operator about.
+    assert_eq!(v["today"].as_str(), Some("2026-09-16"));
+    assert_eq!(days[2]["date"].as_str(), Some("2026-09-16"));
+    assert_eq!(days[0]["date"].as_str(), Some("2026-09-14"));
+    // A quiet day is present, not skipped - a chart with the gaps removed draws a straight line
+    // through a week of nothing - and its counters are absent because zero fields are not written.
+    assert!(
+        days[0]["bucket"].as_object().map(|o| o.is_empty()).unwrap_or(false),
+        "a quiet day reports an empty bucket: {}",
+        days[0]
+    );
+
+    let today = &v["totals"]["today"];
+    assert_eq!(today["requests"].as_u64(), Some(2));
+    assert_eq!(today["successes"].as_u64(), Some(1));
+    assert_eq!(today["errors"].as_u64(), Some(1));
+    assert!(
+        today["cost"].as_f64().unwrap_or(0.0) > 0.0,
+        "the served request was priced: {}",
+        today
+    );
+    assert_eq!(
+        v["accounts"]["go-1"]["today"]["requests"].as_u64(),
+        Some(2),
+        "the breakdown names the endpoint: {}",
+        v["accounts"]
+    );
+
+    // Filtering by endpoint gives that endpoint's day alone.
+    let one = request(r.port, "GET", "/router/history?days=3&account=go-1", None, &[]).json();
+    assert_eq!(one["days"][2]["bucket"]["requests"].as_u64(), Some(2));
+    // An endpoint nobody has heard of is not an error: it is a day with nothing in it.
+    let nobody = request(r.port, "GET", "/router/history?days=3&account=nope", None, &[]).json();
+    assert!(
+        nobody["days"][2]["bucket"].as_object().map(|o| o.is_empty()).unwrap_or(false),
+        "an unknown endpoint reports an empty bucket: {}",
+        nobody["days"][2]
+    );
+}
+
 

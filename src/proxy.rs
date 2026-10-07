@@ -53,6 +53,14 @@ pub struct AppState {
 impl AppState {
     pub fn new(cfg: Config) -> Arc<AppState> {
         let registry = Arc::new(Registry::new());
+        apply_stats_policy(&registry, &cfg);
+        // Said once, to the log rather than to the console: UTC is the right boundary on a UTC
+        // machine and the wrong one everywhere else, and only the operator knows which they are on.
+        if cfg.stats.utc_offset_minutes.is_none() {
+            crate::log_info!(
+                "stats.utc_offset_minutes is unset: daily history is filed by UTC day; set it (480 for UTC+8) or use the console's time-zone button"
+            );
+        }
         let accounts = build_accounts(&cfg, &registry);
         let stream_timeout = cfg.router.stream_idle_timeout_secs.max(60);
         Arc::new(AppState {
@@ -89,6 +97,9 @@ impl AppState {
     pub fn reload(&self) -> Result<String, String> {
         let path = self.cfg().path.clone();
         let cfg = crate::config::load(&path)?;
+        // The day boundary is a property of the config, so it follows a reload. Days already filed
+        // keep their key: moving the boundary would relabel history rather than re-file it.
+        apply_stats_policy(&self.registry, &cfg);
         let accounts = build_accounts(&cfg, &self.registry);
         self.registry
             .retain(&cfg.accounts.iter().map(|a| a.name.clone()).collect::<Vec<_>>());
@@ -107,6 +118,13 @@ impl AppState {
 /// Two endpoints with the same pair are two models on one plan. The key is part of the identity on
 /// purpose: the same provider reached with two different credentials is two plans, and merging them
 /// would invent an allowance that neither credential has.
+/// Point the daily history at the configured day boundary and retention.
+pub fn apply_stats_policy(registry: &Arc<Registry>, cfg: &Config) {
+    if let Ok(mut h) = registry.history().lock() {
+        h.set_policy(cfg.stats.offset_minutes(), cfg.stats.retention_days);
+    }
+}
+
 fn allowance_group(a: &crate::config::AccountCfg) -> String {
     if a.key.trim().is_empty() {
         // No credential to group on (an upstream that needs none): nothing says the endpoints share
@@ -217,6 +235,32 @@ pub fn handle(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
                 );
             }
         }
+        ("GET", "/router/history") => {
+            // Separate from /router/stats on purpose: that one is polled every couple of seconds and
+            // has to stay small, while this one is a few kilobytes of calendar that changes only
+            // when a request is served.
+            let days = query_param(&req, "days")
+                .and_then(|v| v.parse::<i64>().ok())
+                .unwrap_or(30)
+                .clamp(1, 3650);
+            let account = query_param(&req, "account").filter(|v| !v.is_empty());
+            let now = util::now_secs();
+            let h = state
+                .registry
+                .history()
+                .lock()
+                .map(|h| h.clone())
+                .unwrap_or_default();
+            let body = json!({
+                "offset_minutes": h.offset_minutes(),
+                "retention_days": h.retention_days(),
+                "today": crate::state::UsageHistory::day_key(now, h.offset_minutes()),
+                "days": h.recent(now, days, account.as_deref()),
+                "totals": h.totals(now),
+                "accounts": h.account_totals(now),
+            });
+            json_response(req, out, 200, &body);
+        }
         ("GET", "/router/schedule") => {
             let body = schedule_json(&cfg, util::now_secs());
             json_response(req, out, 200, &body);
@@ -269,6 +313,18 @@ pub fn handle(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
             );
         }
     }
+}
+
+/// One query parameter, as sent. No percent-decoding: the values this server reads are a number and
+/// an endpoint name, both of which survive the trip unchanged in every client we have seen.
+fn query_param(req: &Request, key: &str) -> Option<String> {
+    req.query.split('&').find_map(|pair| {
+        let mut it = pair.splitn(2, '=');
+        match (it.next(), it.next()) {
+            (Some(k), Some(v)) if k == key => Some(v.to_string()),
+            _ => None,
+        }
+    })
 }
 
 fn schedule_json(cfg: &Config, now: i64) -> Value {

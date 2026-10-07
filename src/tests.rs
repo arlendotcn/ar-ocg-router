@@ -1807,3 +1807,193 @@ fn merging_a_ledger_with_itself_changes_nothing() {
     assert!((merged.total_cost - 10.0).abs() < 1e-9, "got {}", merged.total_cost);
 }
 
+
+
+// ---------------------------------------------------------------- usage history
+
+/// A day belongs to the operator's calendar, not to UTC. The same instant is two different days
+/// depending on where the person reading the bill is, and an Asian evening would otherwise always
+/// land on tomorrow.
+#[test]
+fn a_day_is_filed_where_the_operator_is() {
+    use crate::state::UsageHistory;
+
+    // 2026-10-07 15:30 UTC = 23:30 in UTC+8: the 7th either way.
+    let evening = timeutil::parse_iso8601("2026-10-07T15:30:00Z").unwrap();
+    assert_eq!(UsageHistory::day_key(evening, 480), "2026-10-07");
+    assert_eq!(UsageHistory::day_key(evening, 0), "2026-10-07");
+
+    // 2026-10-06 23:30 UTC = 07:30 on the 7th in UTC+8 - and that is the whole point of the setting.
+    let morning = timeutil::parse_iso8601("2026-10-06T23:30:00Z").unwrap();
+    assert_eq!(UsageHistory::day_key(morning, 480), "2026-10-07");
+    assert_eq!(UsageHistory::day_key(morning, 0), "2026-10-06");
+
+    // A negative offset has to land on the previous local day the same way.
+    let early = timeutil::parse_iso8601("2026-10-07T02:00:00Z").unwrap();
+    assert_eq!(UsageHistory::day_key(early, -300), "2026-10-06");
+}
+
+/// One request, counted once: the day and the lifetime counters are written from the same numbers at
+/// the same moment, so the two views can never disagree about what happened.
+#[test]
+fn a_days_bucket_holds_what_the_counters_hold() {
+    use crate::state::UsageDelta;
+    use crate::state::{AccountRuntime, UsageBucket};
+
+    let rt = AccountRuntime::new("vol-dsf");
+    let now = timeutil::parse_iso8601("2026-10-07T12:00:00Z").unwrap();
+    let delta = UsageDelta {
+        prompt_tokens: 1_000,
+        completion_tokens: 200,
+        cached_tokens: 400,
+        cost_usd: 0.5,
+        saved_usd: 0.2,
+    };
+    rt.record_success(now, &delta, 1200, true);
+    rt.record_error(now, 429, "too frequent", 30);
+
+    let stats = rt.stats.lock().unwrap().clone();
+    let today = {
+        let h = rt.history.lock().unwrap();
+        h.recent(now, 1, None)
+    };
+    let bucket = crate::state::UsageBucket::from_json(&today[0]["bucket"]);
+    assert_eq!(bucket.requests, 2, "one success, one failure");
+    assert_eq!(bucket.successes, 1);
+    assert_eq!(bucket.errors, 1);
+    assert_eq!(bucket.stream_requests, 1);
+    assert_eq!(bucket.prompt_tokens, 1_000);
+    assert_eq!(bucket.completion_tokens, 200);
+    assert_eq!(bucket.cached_tokens, 400);
+    assert!((bucket.cost - 0.5).abs() < 1e-9);
+    assert!((bucket.saved - 0.2).abs() < 1e-9);
+    assert_eq!(bucket.latency_ms_total, 1230);
+    // The lifetime counters saw the same two attempts.
+    assert_eq!(stats.requests, 2);
+    assert_eq!(stats.successes, 1);
+    assert_eq!(stats.errors, 1);
+    assert_eq!(stats.prompt_tokens, 1_000);
+    assert!((stats.saved_usd - 0.2).abs() < 1e-9);
+    let _ = UsageBucket::default();
+}
+
+/// Week and month are folded out of the days, so they cannot drift from the days they are made of -
+/// and each is compared against the same span of the period before it, not against a whole one.
+#[test]
+fn week_and_month_are_folded_from_the_days() {
+    use crate::state::{UsageBucket, UsageHistory};
+
+    let mut h = UsageHistory::new(0, 400);
+    let day = |s: &str| timeutil::parse_iso8601(s).unwrap();
+    let mut one = UsageBucket::default();
+    one.requests = 1;
+    one.cost = 1.0;
+
+    // 2026-10-07 is a Wednesday; the 5th is that week's Monday, and the 8th is beyond "today".
+    h.record(day("2026-10-05T09:00:00Z"), "a", &one);
+    h.record(day("2026-10-06T09:00:00Z"), "a", &one);
+    h.record(day("2026-10-07T09:00:00Z"), "a", &one);
+    h.record(day("2026-10-08T09:00:00Z"), "a", &one); // future: must not be counted
+    // The week before: one day inside the same Monday-Wednesday span, one outside it. Only the first
+    // belongs in week_prev, which is what makes it a comparison rather than a different question.
+    h.record(day("2026-09-28T09:00:00Z"), "a", &one); // Monday of the previous week
+    h.record(day("2026-09-27T09:00:00Z"), "a", &one); // the Sunday before it
+    h.record(day("2026-09-03T09:00:00Z"), "a", &one); // inside the previous month's same span
+
+    let now = day("2026-10-07T12:00:00Z");
+    let t = h.totals(now);
+    let num = |k: &str, f: &str| t[k][f].as_f64().unwrap_or(0.0);
+    assert_eq!(num("today", "requests"), 1.0);
+    assert_eq!(num("week", "requests"), 3.0, "Monday, Tuesday, today");
+    assert_eq!(num("week_prev", "requests"), 1.0, "the same three days a week earlier");
+    assert_eq!(num("month", "requests"), 3.0, "October so far");
+    assert_eq!(num("month_prev", "requests"), 1.0, "September 1st-7th, not the whole month");
+    assert_eq!(num("last_7_days", "requests"), 3.0, "October 1st onwards; September is outside it");
+}
+
+/// The sample ledger is the only record of days filed before the buckets existed, so it is replayed
+/// into them - but only into days that have nothing, or a restart would double every one of them.
+#[test]
+fn history_backfills_only_days_it_has_nothing_for() {
+    use crate::state::{LedgerSample, UsageBucket, UsageHistory};
+
+    let mut h = UsageHistory::new(0, 400);
+    let ts = timeutil::parse_iso8601("2026-10-06T09:00:00Z").unwrap();
+    let samples = vec![
+        LedgerSample { ts, cost: 0.25, saved: 0.1, prompt: 1000, cached: 0, completion: 100, stream: true },
+        LedgerSample { ts: ts + 60, cost: 0.25, saved: 0.1, prompt: 1000, cached: 0, completion: 100, stream: false },
+    ];
+    h.backfill(&samples);
+    let now = timeutil::parse_iso8601("2026-10-07T12:00:00Z").unwrap();
+    let t = h.totals(now);
+    assert_eq!(t["yesterday"]["requests"].as_f64(), Some(2.0));
+    assert!((t["yesterday"]["cost"].as_f64().unwrap() - 0.5).abs() < 1e-9);
+    assert_eq!(t["yesterday"]["stream_requests"].as_f64(), Some(1.0));
+    // A second run must change nothing: the day already has history.
+    h.backfill(&samples);
+    let t = h.totals(now);
+    assert_eq!(t["yesterday"]["requests"].as_f64(), Some(2.0));
+
+    // A later pass must not add the reconstructed two again on top of what has since been counted:
+    // the day is no longer empty, so it is left exactly as it stands.
+    let one = UsageBucket { requests: 5, ..UsageBucket::default() };
+    h.record(ts, "a", &one);
+    h.backfill(&samples);
+    let t = h.totals(now);
+    assert_eq!(t["yesterday"]["requests"].as_f64(), Some(7.0), "five counted on top of two reconstructed");
+    // And only the counted ones are attributed to an endpoint: the ledger does not name one.
+    let accounts = h.account_totals(now);
+    assert_eq!(accounts["a"]["week"]["requests"].as_f64(), Some(5.0), "the recorded day is yesterday, inside this week");
+}
+
+/// Retention is a window, not a wipe: what falls out is the oldest day, and only once the local day
+/// has actually moved.
+#[test]
+fn history_prunes_by_retention() {
+    use crate::state::{UsageBucket, UsageHistory};
+
+    let mut h = UsageHistory::new(0, 3);
+    let mut one = UsageBucket::default();
+    one.requests = 1;
+    for d in ["2026-10-01", "2026-10-05", "2026-10-06", "2026-10-07"] {
+        h.record(timeutil::parse_iso8601(&format!("{}T09:00:00Z", d)).unwrap(), "a", &one);
+    }
+    let now = timeutil::parse_iso8601("2026-10-07T12:00:00Z").unwrap();
+    h.prune(now);
+    let t = h.totals(now);
+    // Three days back from the 7th is the 4th, so the 1st is gone and the 5th survives.
+    assert_eq!(t["last_7_days"]["requests"].as_f64(), Some(3.0));
+    let first = t["first_day"].as_str().unwrap();
+    assert_eq!(first, "2026-10-05");
+}
+
+/// The file has to round-trip exactly, zero fields included - a bucket written sparsely has to come
+/// back with the same numbers rather than with a day that looks empty.
+#[test]
+fn history_survives_a_round_trip() {
+    use crate::state::{UsageBucket, UsageHistory};
+
+    let mut h = UsageHistory::new(480, 120);
+    let ts = timeutil::parse_iso8601("2026-10-07T09:00:00Z").unwrap();
+    let delta = UsageBucket::success(1000, 400, 200, 0.75, 0.25, 1500, true);
+    h.record(ts, "vol-dsf", &delta);
+    h.record(ts + 60, "go-dsf", &UsageBucket::success(10, 0, 5, 0.01, 0.0, 20, false));
+
+    let back = UsageHistory::from_json(&h.to_json());
+    assert_eq!(back.offset_minutes(), 480);
+    assert_eq!(back.retention_days(), 120);
+    let now = ts;
+    let t1 = h.totals(now);
+    let t2 = back.totals(now);
+    assert_eq!(t1["today"]["requests"], t2["today"]["requests"]);
+    assert_eq!(t1["today"]["cost"], t2["today"]["cost"]);
+    assert_eq!(t1["today"]["stream_requests"], t2["today"]["stream_requests"]);
+    let a1 = h.account_totals(now);
+    let a2 = back.account_totals(now);
+    assert_eq!(a1["vol-dsf"]["today"]["cost"], a2["vol-dsf"]["today"]["cost"]);
+    assert_eq!(a2["go-dsf"]["today"]["requests"].as_f64(), Some(1.0));
+    // Zero fields are left out on the way to disk, so the file stays small.
+    let text = serde_json::to_string(&h.to_json()).unwrap();
+    assert!(!text.contains("\"errors\""), "a zero field was written: {}", text);
+}
+

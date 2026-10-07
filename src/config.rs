@@ -480,6 +480,36 @@ impl Default for LogCfg {
     }
 }
 
+/// How the daily history is filed.
+#[derive(Debug, Clone)]
+pub struct StatsCfg {
+    /// Minutes east of UTC used to decide which day a request belongs to. `None` means the machine's
+    /// own zone, read once at startup.
+    ///
+    /// The boundary that matters to the person reading a bill is midnight where they are: filing by
+    /// UTC day puts the last eight hours of an Asian evening on the next date. A container running
+    /// in UTC therefore needs this set, or every evening after 16:00 local lands on tomorrow.
+    pub utc_offset_minutes: Option<i32>,
+    /// Days of history to keep. Daily buckets are tiny, so this is measured in years rather than
+    /// kilobytes: 400 days covers a year-on-year comparison.
+    pub retention_days: u32,
+}
+
+impl Default for StatsCfg {
+    fn default() -> Self {
+        StatsCfg { utc_offset_minutes: None, retention_days: 400 }
+    }
+}
+
+impl StatsCfg {
+    /// The offset to file by. Unset means UTC, which is the right answer on a UTC machine and the
+    /// wrong one everywhere else - so an unset value is reported at startup rather than assumed, and
+    /// the console offers to fill it in from the browser.
+    pub fn offset_minutes(&self) -> i32 {
+        self.utc_offset_minutes.unwrap_or(0).clamp(-1080, 1080)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RouterCfg {
     pub mode: RouterMode,
@@ -630,6 +660,7 @@ pub struct Config {
     pub log: LogCfg,
     pub router: RouterCfg,
     pub compat: CompatCfg,
+    pub stats: StatsCfg,
     pub accounts: Vec<AccountCfg>,
     pub warnings: Vec<String>,
 }
@@ -858,6 +889,32 @@ pub fn parse(raw: &str, path: &Path) -> Result<Config, String> {
     let mut log = LogCfg::default();
     let mut router = RouterCfg::default();
     let mut compat = CompatCfg::default();
+    let mut stats = StatsCfg::default();
+
+    if let Some(m) = yget(root, "stats").and_then(ymap) {
+        // `auto` and an absent key both mean "not configured": the router cannot read the machine's
+        // zone without a timezone database, and guessing one is worse than saying it is unset.
+        match yget_any(m, &["utc_offset_minutes", "utc_offset", "offset_minutes"]) {
+            Some(v) => {
+                if let Some(n) = v.as_i64() {
+                    stats.utc_offset_minutes = Some(n.clamp(-1080, 1080) as i32);
+                } else if let Some(s) = ystr(v) {
+                    if let Ok(n) = s.trim().parse::<i32>() {
+                        stats.utc_offset_minutes = Some(n.clamp(-1080, 1080));
+                    } else if !s.eq_ignore_ascii_case("auto") && !s.trim().is_empty() {
+                        warnings.push(format!(
+                            "stats.utc_offset_minutes {:?} is not a number of minutes; history will be filed by UTC day",
+                            s
+                        ));
+                    }
+                }
+            }
+            None => {}
+        }
+        if let Some(v) = yget_any(m, &["retention_days", "history_days"]) {
+            stats.retention_days = yint(v, stats.retention_days as i64).clamp(1, 3650) as u32;
+        }
+    }
 
     if let Some(m) = yget(root, "server").and_then(ymap) {
         if let Some(v) = yget_any(m, &["host", "bind"]) {
@@ -1051,14 +1108,14 @@ pub fn parse(raw: &str, path: &Path) -> Result<Config, String> {
     }
 
     // Unknown top-level sections are almost always typos (opencodego: instead of plans: ...).
-    const KNOWN_SECTIONS: [&str; 5] = ["server", "log", "router", "compat", "plans"];
+    const KNOWN_SECTIONS: [&str; 6] = ["server", "log", "router", "stats", "compat", "plans"];
     for (k, _) in root.iter() {
         if let Some(key) = ystr(k) {
             if key == "fallback" || KNOWN_SECTIONS.contains(&key.as_str()) {
                 continue;
             }
             warnings.push(format!(
-                "unknown top-level section {:?} (known: server, log, router, compat, plans, fallback) - ignored",
+                "unknown top-level section {:?} (known: server, log, router, stats, compat, plans, fallback) - ignored",
                 key
             ));
         }
@@ -1430,6 +1487,7 @@ pub fn parse(raw: &str, path: &Path) -> Result<Config, String> {
         log,
         router,
         compat,
+        stats,
         accounts,
         warnings,
     })
