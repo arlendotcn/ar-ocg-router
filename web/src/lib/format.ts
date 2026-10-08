@@ -29,6 +29,21 @@ export function fmtMoney(n: number | null | undefined, currency?: string | null,
   return sym + n.toFixed(digits).replace(/0+$/, "").replace(/\.$/, "");
 }
 
+/**
+ * A count in a friendly unit: 29.5M, 1.2B. For a cell that reports scale, not bookkeeping - the
+ * exact figure belongs in the detail view, where there is room for it.
+ */
+export function fmtCompact(n: number | null | undefined): string {
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  const v = Math.abs(n);
+  if (v < 1000) return String(Math.round(n));
+  if (v < 1e4) return (n / 1e3).toFixed(1) + "K";
+  if (v < 1e6) return (n / 1e3).toFixed(0) + "K";
+  if (v < 1e7) return (n / 1e6).toFixed(2) + "M";
+  if (v < 1e9) return (n / 1e6).toFixed(1) + "M";
+  return (n / 1e9).toFixed(2) + "B";
+}
+
 export function fmtBytes(n: number): string {
   if (!n) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];

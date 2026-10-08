@@ -11,10 +11,11 @@ import { Switch } from "@/components/ui/field";
 import { Button } from "@/components/ui/button";
 import { Meter } from "@/components/ui/meter";
 import { Plate, PlateBlock, Readout } from "@/components/ui/plate";
+import { Sheet } from "@/components/ui/sheet";
 import { PageHeader } from "@/components/page-header";
 import { HistoryPanel, onlyCurrency, num, tokens, useHistory, type Metric } from "./history-block";
 
-import { fmtBytes, fmtAgo, fmtDuration, fmtMoney, fmtNum, fmtPct, fmtWhen, moneySymbol } from "@/lib/format";
+import { fmtBytes, fmtAgo, fmtCompact, fmtDuration, fmtMoney, fmtNum, fmtPct, fmtWhen, moneySymbol } from "@/lib/format";
 import type { Account } from "@/types/api";
 import { cn } from "@/lib/utils";
 
@@ -222,7 +223,12 @@ export function DashboardPage() {
            share the other half exactly: 3 + 1 + 1 + 1 = 6. A 4-column grid with a col-span-2
            clock and three 1-wide cells sums to 5 and wraps the last one onto its own row. */}
       <Plate className="rise overflow-hidden">
-        <div className="grid grid-cols-1 sm:grid-cols-6">
+        {/* Seven columns: the clock takes three, and the four cells beside it one each. The token
+            cell was inserted to the clock's right, which is why this is 3+1+1+1+1 rather than the
+            3+1+1+1 the plate used to have. */}
+        {/* Weights instead of equal columns: the clock and the peak-window cell need room, the token
+            cell does not - an equal split wraps the window onto four lines. */}
+        <div className="grid grid-cols-1 sm:grid-cols-[3fr_1fr_1.1fr_1.9fr_1fr]">
           <div className="border-b border-[var(--line)] px-3 py-3 sm:col-span-3 sm:border-b-0 sm:border-r">
             <div className="flex items-center gap-2">
               <span
@@ -236,17 +242,23 @@ export function DashboardPage() {
               {r.peak ? t.dash.peak : t.dash.offpeak}
             </div>
             <div className="mt-2 text-xs text-[var(--ink-faint)]">{fmtWhen(r.now, lang)}</div>
-            {/* Today's usage, on the row that already says what day it is. The money figure is
-                absent when the endpoints do not share a currency - see onlyCurrency. */}
-            <div className="mono mt-1 flex flex-wrap items-baseline gap-x-2 text-xs text-[var(--ink-dim)]">
-              <span className="label">{t.history.today}</span>
-              <span>{fmtNum(num(hist?.totals?.today, "requests"))} {t.history.requests}</span>
-              <span className="text-[var(--ink-faint)]">{fmtNum(tokens(hist?.totals?.today))} tok</span>
-              {histSingle ? (
-                <span>{fmtMoney(num(hist?.totals?.today, "cost"), histSingle)}</span>
-              ) : null}
-            </div>
           </div>
+          {/* Token consumption, by day/week/month, in units that fit a narrow cell. It is the
+              whole entry point to the history: click it for the complete figures. */}
+          <button
+            type="button"
+            onClick={() => setHistOpen(true)}
+            title={t.history.openDetail}
+            className="flex flex-col items-stretch gap-[3px] border-b border-[var(--line)] px-3 py-3 text-left transition-colors hover:bg-[var(--panel-2)] sm:border-b-0 sm:border-r"
+          >
+            <span className="label">{t.history.tokens}</span>
+            {(["today", "week", "month"] as const).map((p, i) => (
+              <span key={p} className="mono flex items-baseline justify-between gap-1 text-xs leading-tight">
+                <span className="text-[var(--ink-faint)]">{[t.history.dayShort, t.history.weekShort, t.history.monthShort][i]}</span>
+                <span>{fmtCompact(tokens(hist?.totals?.[p]))}</span>
+              </span>
+            ))}
+          </button>
           <Readout
             label={t.dash.nextChange}
             value={fmtDuration(secondsLeft, lang)}
@@ -274,26 +286,8 @@ export function DashboardPage() {
           <Readout
             label={t.dash.requests}
             value={fmtNum(c.requests)}
+            sub={`${t.dash.proxied} ${fmtNum(c.proxied)} · ${t.dash.errors} ${fmtNum(c.errors)}`}
             help={t.dash.lifetimeHint}
-            sub={
-              <>
-                <div>{`${t.dash.proxied} ${fmtNum(c.proxied)} · ${t.dash.errors} ${fmtNum(c.errors)}`}</div>
-                {/* The time dimension the lifetime counter cannot express, on the row it belongs
-                    to - and the way into the rest of it. */}
-                <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2">
-                  <span>{t.history.today} {fmtNum(num(hist?.totals?.today, "requests"))}</span>
-                  <span>{t.history.week} {fmtNum(num(hist?.totals?.week, "requests"))}</span>
-                  <span>{t.history.month} {fmtNum(num(hist?.totals?.month, "requests"))}</span>
-                  <button
-                    type="button"
-                    onClick={() => setHistOpen((v) => !v)}
-                    className="mono underline decoration-dotted underline-offset-2 hover:text-[var(--ink)]"
-                  >
-                    {histOpen ? t.history.hide : t.history.detail}
-                  </button>
-                </div>
-              </>
-            }
           />
         </Plate>
         <Plate className="rise">
@@ -305,8 +299,14 @@ export function DashboardPage() {
         </Plate>
       </div>
 
-      {/* ---- daily history, behind a toggle: the overview keeps the layout it had ---- */}
-      {histOpen ? (
+      {/* ---- the complete history, in a sheet: the overview keeps the layout it had ---- */}
+      <Sheet
+        open={histOpen}
+        onClose={() => setHistOpen(false)}
+        title={t.history.title}
+        subtitle={t.history.help}
+        wide
+      >
         <HistoryPanel
           data={hist}
           span={histSpan}
@@ -314,9 +314,8 @@ export function DashboardPage() {
           metric={histMetric}
           setMetric={setHistMetric}
           accounts={endpointCurrencies}
-          onClose={() => setHistOpen(false)}
         />
-      ) : null}
+      </Sheet>
 
       {/* ---- per side summary ---- */}
       <div className="grid gap-3 sm:grid-cols-2">

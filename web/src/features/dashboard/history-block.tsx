@@ -5,7 +5,6 @@ import { useI18n } from "@/lib/i18n";
 import { api } from "@/lib/api";
 import { useToast } from "@/components/ui/toast";
 import { Button } from "@/components/ui/button";
-import { PlateBlock } from "@/components/ui/plate";
 import { fmtMoney, fmtNum } from "@/lib/format";
 import type { History, HistoryBucket } from "@/types/api";
 import { cn } from "@/lib/utils";
@@ -68,7 +67,6 @@ export function HistoryPanel({
   metric,
   setMetric,
   accounts,
-  onClose,
 }: {
   data: History | null;
   span: number;
@@ -76,7 +74,6 @@ export function HistoryPanel({
   metric: Metric;
   setMetric: (m: Metric) => void;
   accounts: { name: string; currency: string }[];
-  onClose: () => void;
 }) {
   const { t } = useI18n();
   const toast = useToast();
@@ -128,8 +125,7 @@ export function HistoryPanel({
     m === "cost" ? (currency ? fmtMoney(v, currency) : v.toFixed(2)) : fmtNum(v);
 
   return (
-    <PlateBlock title={t.history.title} hint={t.history.help}>
-      <div className="space-y-3 px-3 py-3 sm:px-4">
+    <div className="space-y-3">
         {offset === null ? (
           <div className="flex flex-wrap items-center justify-between gap-2 border-l-2 border-[var(--warn)]/50 bg-[var(--panel-2)] px-2.5 py-2 text-xs text-[var(--ink-dim)]">
             <span>{t.history.tzUnset}</span>
@@ -176,9 +172,6 @@ export function HistoryPanel({
               ))}
               <Button size="sm" variant="ghost" onClick={exportCsv} disabled={days.length === 0}>
                 {t.common.export}
-              </Button>
-              <Button size="sm" variant="ghost" onClick={onClose}>
-                {t.common.close}
               </Button>
             </div>
           </div>
@@ -250,7 +243,6 @@ export function HistoryPanel({
             .replace("{off}", offset == null ? "UTC" : `UTC${offset >= 0 ? "+" : ""}${(offset / 60).toFixed(offset % 60 === 0 ? 0 : 1)}`)
             .replace("{n}", String(data?.retention_days ?? 400))}
         </div>
-      </div>
-    </PlateBlock>
+    </div>
   );
 }
