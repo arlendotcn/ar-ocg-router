@@ -35,7 +35,8 @@ export function DashboardPage() {
   // Daily history: the few figures that fit the existing rows, and the detail block behind a toggle.
   const [histSpan, setHistSpan] = React.useState(30);
   const [histOpen, setHistOpen] = React.useState(false);
-  const [histMetric, setHistMetric] = React.useState<Metric>("requests");
+  // Tokens first: they are the unit the allowance is spent in, so they are what the chart opens on.
+  const [histMetric, setHistMetric] = React.useState<Metric>("tokens");
   const { data: hist } = useHistory(histSpan);
   const endpointCurrencies = React.useMemo(
     () => (stats?.accounts ?? []).map((a) => ({ name: a.name, currency: a.stats.currency })),

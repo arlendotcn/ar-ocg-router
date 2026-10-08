@@ -181,25 +181,27 @@ export function HistoryPanel({
           const saved = savedByCurrency(data, accounts, c.key as "today" | "week" | "month");
           return (
             <div key={c.key} className="rounded-[2px] border border-[var(--line)] bg-[var(--panel-2)] px-3 py-2.5">
+              {/* The comparison sits with the label that names it: on its own line at the bottom it
+                  reads as a stray caption belonging to whatever is above it. */}
               <div className="flex items-baseline justify-between gap-2">
                 <span className="label">{c.label}</span>
                 {pct === null ? null : (
-                  <span className={cn("mono text-2xs", pct >= 0 ? "text-[var(--up)]" : "text-[var(--ink-faint)]")}>
-                    {pct >= 0 ? "+" : ""}{pct.toFixed(0)}%
+                  <span
+                    title={t.history.vsPrevHint}
+                    className={cn("mono shrink-0 text-2xs", pct >= 0 ? "text-[var(--up)]" : "text-[var(--ink-faint)]")}
+                  >
+                    {pct >= 0 ? "+" : ""}{pct.toFixed(0)}% {t.history.vsPrev}
                   </span>
                 )}
               </div>
               <div className="mono mt-1.5 truncate text-2xl leading-none">{headline}</div>
               <div className="mono mt-1.5 text-2xs text-[var(--ink-faint)]">
-                {fmtNum(num(now, "requests"))} {t.history.requests} · {fmtCompact(tokens(now))} tok
+                {fmtNum(num(now, "requests"))} {t.history.requests} · {fmtCompact(tokens(now))} {t.history.tokenUnit}
               </div>
               {saved.length === 0 ? null : (
                 <div className="mono mt-0.5 text-2xs text-[var(--up)]">
                   {t.history.saved} {saved.join(" · ")}
                 </div>
-              )}
-              {pct === null ? null : (
-                <div className="mono mt-0.5 text-2xs text-[var(--ink-faint)]">{t.history.vsPrev}</div>
               )}
             </div>
           );
@@ -210,7 +212,7 @@ export function HistoryPanel({
       <div className="rounded-[2px] border border-[var(--line)]">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--line)] px-3 py-2">
           <div className="flex gap-1">
-            {(["requests", "tokens", ...(single ? (["cost"] as Metric[]) : [])] as Metric[]).map((m) => (
+            {(["tokens", "requests", ...(single ? (["cost"] as Metric[]) : [])] as Metric[]).map((m) => (
               <button
                 key={m}
                 type="button"
