@@ -259,7 +259,15 @@ pub fn handle(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
                 "totals": h.totals(now),
                 "accounts": h.account_totals(now),
             });
-            json_response(req, out, 200, &body);
+            // no-cache, like /router/stats: the console re-reads this to watch a day grow, and a
+            // cached copy would show a figure that stops at whatever the browser last stored.
+            let _ = out.send_json_with(
+                200,
+                &body,
+                &[("Cache-Control".to_string(), "no-cache".to_string())],
+                req.keep_alive,
+                &req.version,
+            );
         }
         ("GET", "/router/schedule") => {
             let body = schedule_json(&cfg, util::now_secs());

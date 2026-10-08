@@ -35,7 +35,16 @@ const metricOf = (b: HistoryBucket | undefined, m: Metric) =>
   m === "requests" ? num(b, "requests") : m === "tokens" ? tokens(b) : num(b, "cost");
 
 /** Fetch the history on its own cadence: a day bucket changes when a request is served. */
-export function useHistory(span: number) {
+/**
+ * Fetch the history, at a cadence the caller chooses.
+ *
+ * It is not the two-second statistics poll and should not be: this answer is a few kilobytes of
+ * calendar, and the day buckets only move when a request finishes. But a minute is long enough that a
+ * figure beside a counter updating every two seconds looks frozen, so the panel asks for a fast
+ * cadence while it is open. Changing the cadence re-runs the effect, which means opening the panel
+ * fetches immediately rather than waiting for the next tick.
+ */
+export function useHistory(span: number, intervalMs = 10_000) {
   const [data, setData] = React.useState<History | null>(null);
   React.useEffect(() => {
     let alive = true;
@@ -45,9 +54,9 @@ export function useHistory(span: number) {
         .catch(() => { /* keep whatever was last shown */ });
     };
     load();
-    const id = window.setInterval(load, 60_000);
+    const id = window.setInterval(load, intervalMs);
     return () => { alive = false; window.clearInterval(id); };
-  }, [span]);
+  }, [span, intervalMs]);
   return { data, span };
 }
 

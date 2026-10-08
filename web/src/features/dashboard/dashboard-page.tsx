@@ -37,7 +37,8 @@ export function DashboardPage() {
   const [histOpen, setHistOpen] = React.useState(false);
   // Tokens first: they are the unit the allowance is spent in, so they are what the chart opens on.
   const [histMetric, setHistMetric] = React.useState<Metric>("tokens");
-  const { data: hist } = useHistory(histSpan);
+  // Fast while the panel is open (that is where the numbers are being watched), quiet otherwise.
+  const { data: hist } = useHistory(histSpan, histOpen ? 3_000 : 10_000);
   const endpointCurrencies = React.useMemo(
     () => (stats?.accounts ?? []).map((a) => ({ name: a.name, currency: a.stats.currency })),
     [stats],
