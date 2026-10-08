@@ -5,21 +5,19 @@ import { useI18n } from "@/lib/i18n";
 import { api } from "@/lib/api";
 import { useToast } from "@/components/ui/toast";
 import { Button } from "@/components/ui/button";
-import { fmtMoney, fmtNum } from "@/lib/format";
+import { fmtCompact, fmtMoney, fmtNum } from "@/lib/format";
 import type { History, HistoryBucket } from "@/types/api";
 import { cn } from "@/lib/utils";
 
 /**
- * Daily history, in two layers.
- *
- * The overview is a fixed layout someone watches: adding a block to it pushes everything down and
- * makes the page re-learn itself. So the numbers that fit on the existing rows go *into* them - a
- * line under the request counter, a figure in the clock cell - and the rest (a month of bars, the
- * per-endpoint split, the CSV) waits behind `HistoryPanel`, which is collapsed until asked for.
+ * The complete history, laid out for the sheet it lives in rather than for the overview row it is
+ * opened from: a summary across the top, a chart with room to read, the per-endpoint split under it,
+ * and the settings and export at the end where they do not compete with the numbers.
  *
  * Money is never summed across endpoints: several plans can be denominated in different currencies,
- * and their sum would be a number in no currency at all. Each endpoint's money is shown in its own
- * unit, and the single compact figure only appears when there is exactly one currency to speak of.
+ * and their sum would be a number in no currency at all. When every endpoint shares one currency the
+ * summary leads with money; otherwise it leads with requests and the money stays in the table, in
+ * each endpoint's own unit.
  */
 
 export type Metric = "requests" | "tokens" | "cost";
@@ -47,17 +45,41 @@ export function useHistory(span: number) {
   return { data, span };
 }
 
-/** The one number a single-currency install can put on an existing row; null when it is a mix. */
+/**
+ * The single currency every endpoint shares, or null when they do not.
+ *
+ * Also null when the newest day was rebuilt from the ledger: such a day carries money that belongs
+ * to no endpoint, so a single-currency figure would silently omit it.
+ */
 export function onlyCurrency(
   data: History | null,
   accounts: { name: string; currency: string }[],
 ): string | null {
   const seen = new Set(accounts.map((a) => a.currency).filter((c) => c && c.trim() !== ""));
   if (seen.size !== 1) return null;
-  // A day rebuilt from the ledger has money that belongs to no endpoint, so a single-currency figure
-  // would be missing exactly that part. It is shown only when the day was counted as it happened.
   if (data?.days?.[data.days.length - 1]?.backfilled) return null;
   return [...seen][0] ?? null;
+}
+
+/**
+ * What the plans saved, grouped by the currency each one is priced in.
+ *
+ * A saved amount belongs to the endpoint that did the saving - it is the cash price it avoided - so
+ * several currencies must be listed rather than added, exactly like the money they are compared to.
+ */
+function savedByCurrency(
+  data: History | null,
+  accounts: { name: string; currency: string }[],
+  period: "today" | "week" | "month",
+): string[] {
+  const totals = new Map<string, number>();
+  for (const a of accounts) {
+    const v = num(data?.accounts?.[a.name]?.[period], "saved");
+    if (v <= 0) continue;
+    const cur = (a.currency || "").trim();
+    totals.set(cur, (totals.get(cur) ?? 0) + v);
+  }
+  return [...totals.entries()].map(([cur, v]) => fmtMoney(v, cur));
 }
 
 export function HistoryPanel({
@@ -104,13 +126,23 @@ export function HistoryPanel({
 
   const single = onlyCurrency(data, accounts);
   const days = data?.days ?? [];
-  const peak = Math.max(1, ...days.map((d) => metricOf(d.bucket, metric)));
   const accountNames = Object.keys(data?.accounts ?? {}).sort();
+  const peak = Math.max(1, ...days.map((d) => metricOf(d.bucket, metric)));
+  const periodTotal = days.reduce((a, d) => a + metricOf(d.bucket, metric), 0);
+  const anyBackfilled = days.some((d) => d.backfilled);
+
+  const fmt = (v: number, m: Metric, currency?: string | null) =>
+    m === "cost" ? (currency ? fmtMoney(v, currency) : v.toFixed(2)) : fmtNum(v);
+  const compact = (v: number) => (metric === "cost" ? fmtMoney(v, single) : fmtCompact(v));
 
   const exportCsv = () => {
-    const header = ["date", "requests", "successes", "errors", "prompt_tokens", "completion_tokens", "cached_tokens", "cost", "saved"];
+    const header = ["date", "requests", "successes", "errors", "prompt_tokens", "completion_tokens", "cached_tokens", "cost", "saved", "backfilled"];
     const rows = days.map((d) =>
-      [d.date, ...header.slice(1).map((k) => String((d.bucket as Record<string, number | undefined>)[k] ?? 0))].join(","),
+      [
+        d.date,
+        ...header.slice(1, 9).map((k) => String((d.bucket as Record<string, number | undefined>)[k] ?? 0)),
+        d.backfilled ? "yes" : "no",
+      ].join(","),
     );
     const blob = new Blob([header.join(",") + "\n" + rows.join("\n") + "\n"], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
@@ -121,76 +153,117 @@ export function HistoryPanel({
     URL.revokeObjectURL(url);
   };
 
-  const fmt = (v: number, m: Metric, currency?: string | null) =>
-    m === "cost" ? (currency ? fmtMoney(v, currency) : v.toFixed(2)) : fmtNum(v);
+  const cards = [
+    { key: "today", label: t.history.today, now: data?.totals?.today, before: data?.totals?.yesterday },
+    { key: "week", label: t.history.week, now: data?.totals?.week, before: data?.totals?.week_prev },
+    { key: "month", label: t.history.month, now: data?.totals?.month, before: data?.totals?.month_prev },
+  ];
 
   return (
-    <div className="space-y-3">
-        {offset === null ? (
-          <div className="flex flex-wrap items-center justify-between gap-2 border-l-2 border-[var(--warn)]/50 bg-[var(--panel-2)] px-2.5 py-2 text-xs text-[var(--ink-dim)]">
-            <span>{t.history.tzUnset}</span>
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => void useBrowserTime()}>
-              {t.history.tzUse.replace("{n}", String(-new Date().getTimezoneOffset()))}
-            </Button>
-          </div>
-        ) : null}
+    <div className="space-y-4">
+      {offset === null ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 border-l-2 border-[var(--warn)]/50 bg-[var(--panel-2)] px-2.5 py-2 text-xs text-[var(--ink-dim)]">
+          <span>{t.history.tzUnset}</span>
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => void useBrowserTime()}>
+            {t.history.tzUse.replace("{n}", String(-new Date().getTimezoneOffset()))}
+          </Button>
+        </div>
+      ) : null}
 
-        <div>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex gap-1">
-              {(["requests", "tokens", ...(single ? (["cost"] as Metric[]) : [])] as Metric[]).map((m) => (
-                <button
-                  key={m}
-                  type="button"
-                  onClick={() => setMetric(m)}
-                  className={cn(
-                    "mono rounded-[2px] border px-2 py-[3px] text-2xs transition-colors",
-                    metric === m
-                      ? "border-[var(--signal)] text-[var(--signal)]"
-                      : "border-[var(--line-strong)] text-[var(--ink-faint)] hover:text-[var(--ink)]",
-                  )}
-                >
-                  {m === "cost" ? t.history.money : m === "tokens" ? t.history.tokens : t.history.requests}
-                </button>
-              ))}
+      {/* ---- the three periods, side by side: the question the panel exists to answer ---- */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        {cards.map((c) => {
+          const now = c.now;
+          const a = metricOf(now, metric);
+          const b = metricOf(c.before, metric);
+          const pct = b > 0 ? ((a - b) / b) * 100 : null;
+          const headline = single ? fmtMoney(num(now, "cost"), single) : fmtNum(num(now, "requests"));
+          const saved = savedByCurrency(data, accounts, c.key as "today" | "week" | "month");
+          return (
+            <div key={c.key} className="rounded-[2px] border border-[var(--line)] bg-[var(--panel-2)] px-3 py-2.5">
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="label">{c.label}</span>
+                {pct === null ? null : (
+                  <span className={cn("mono text-2xs", pct >= 0 ? "text-[var(--up)]" : "text-[var(--ink-faint)]")}>
+                    {pct >= 0 ? "+" : ""}{pct.toFixed(0)}%
+                  </span>
+                )}
+              </div>
+              <div className="mono mt-1.5 truncate text-2xl leading-none">{headline}</div>
+              <div className="mono mt-1.5 text-2xs text-[var(--ink-faint)]">
+                {fmtNum(num(now, "requests"))} {t.history.requests} · {fmtCompact(tokens(now))} tok
+              </div>
+              {saved.length === 0 ? null : (
+                <div className="mono mt-0.5 text-2xs text-[var(--up)]">
+                  {t.history.saved} {saved.join(" · ")}
+                </div>
+              )}
+              {pct === null ? null : (
+                <div className="mono mt-0.5 text-2xs text-[var(--ink-faint)]">{t.history.vsPrev}</div>
+              )}
             </div>
-            <div className="flex items-center gap-1">
-              {[7, 30, 90].map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => setSpan(s)}
-                  className={cn(
-                    "mono rounded-[2px] border px-2 py-[3px] text-2xs transition-colors",
-                    span === s
-                      ? "border-[var(--signal)] text-[var(--signal)]"
-                      : "border-[var(--line-strong)] text-[var(--ink-faint)] hover:text-[var(--ink)]",
-                  )}
-                >
-                  {s}d
-                </button>
-              ))}
-              <Button size="sm" variant="ghost" onClick={exportCsv} disabled={days.length === 0}>
-                {t.common.export}
-              </Button>
-            </div>
-          </div>
+          );
+        })}
+      </div>
 
-          <div className="mt-2 flex h-24 items-end gap-[2px]">
+      {/* ---- the chart: taller here than it could ever be on the overview ---- */}
+      <div className="rounded-[2px] border border-[var(--line)]">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--line)] px-3 py-2">
+          <div className="flex gap-1">
+            {(["requests", "tokens", ...(single ? (["cost"] as Metric[]) : [])] as Metric[]).map((m) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => setMetric(m)}
+                className={cn(
+                  "mono rounded-[2px] border px-2 py-[3px] text-2xs transition-colors",
+                  metric === m
+                    ? "border-[var(--signal)] text-[var(--signal)]"
+                    : "border-[var(--line-strong)] text-[var(--ink-faint)] hover:text-[var(--ink)]",
+                )}
+              >
+                {m === "cost" ? t.history.money : m === "tokens" ? t.history.tokens : t.history.requests}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-1">
+            {[7, 30, 90].map((s) => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => setSpan(s)}
+                className={cn(
+                  "mono rounded-[2px] border px-2 py-[3px] text-2xs transition-colors",
+                  span === s
+                    ? "border-[var(--signal)] text-[var(--signal)]"
+                    : "border-[var(--line-strong)] text-[var(--ink-faint)] hover:text-[var(--ink)]",
+                )}
+              >
+                {s}d
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="px-3 py-3">
+          <div className="mono flex items-baseline justify-between gap-2 text-2xs text-[var(--ink-faint)]">
+            <span>{t.history.peakDay} {compact(peak)}</span>
+            <span>{t.history.periodTotal} {compact(periodTotal)}</span>
+          </div>
+          <div className="mt-2 flex h-40 items-end gap-[3px] border-b border-[var(--line)] pb-[1px]">
             {days.length === 0 ? (
               <div className="mono text-2xs text-[var(--ink-faint)]">{t.history.empty}</div>
             ) : (
               days.map((d) => {
                 const v = metricOf(d.bucket, metric);
-                const h = v <= 0 ? 0 : Math.max(3, Math.round((v / peak) * 100));
+                const h = v <= 0 ? 0 : Math.max(2, Math.round((v / peak) * 100));
                 return (
                   <div
                     key={d.date}
-                    title={`${d.date} · ${fmt(v, metric, single)} ${num(d.bucket, "requests")} ${t.history.requests}${d.backfilled ? ` · ${t.history.backfilled}` : ""}`}
+                    title={`${d.date} · ${fmt(v, metric, single)} · ${num(d.bucket, "requests")} ${t.history.requests}${d.backfilled ? ` · ${t.history.backfilled}` : ""}`}
                     style={{ height: `${h}%` }}
                     className={cn(
-                      "min-w-0 flex-1 rounded-[1px]",
-                      d.backfilled ? "bg-[var(--ink-faint)]/40" : "bg-[var(--signal)]/70",
+                      "min-w-0 flex-1 rounded-t-[1px] transition-colors hover:brightness-125",
+                      d.backfilled ? "bg-[var(--ink-faint)]/45" : "bg-[var(--signal)]/70",
                     )}
                   />
                 );
@@ -201,48 +274,100 @@ export function HistoryPanel({
             <span>{days[0]?.date ?? ""}</span>
             <span>{days[days.length - 1]?.date ?? ""}</span>
           </div>
+          {anyBackfilled ? (
+            <div className="mono mt-2 flex items-center gap-1.5 text-2xs text-[var(--ink-faint)]">
+              <span className="inline-block h-2 w-2 rounded-[1px] bg-[var(--ink-faint)]/45" />
+              {t.history.backfilled}
+            </div>
+          ) : null}
         </div>
+      </div>
 
-        {accountNames.length === 0 ? null : (
+      {/* ---- per endpoint, in each endpoint's own currency ---- */}
+      {accountNames.length === 0 ? null : (
+        <div className="overflow-hidden rounded-[2px] border border-[var(--line)]">
           <table className="mono w-full text-xs">
-            <thead>
+            <thead className="bg-[var(--panel-2)]">
               <tr className="text-2xs uppercase tracking-[0.12em] text-[var(--ink-dim)]">
-                <th className="py-1 text-left font-normal">{t.endpoints.title}</th>
-                <th className="py-1 text-right font-normal">{t.history.today}</th>
-                <th className="py-1 text-right font-normal">{t.history.week}</th>
-                <th className="py-1 text-right font-normal">{t.history.month}</th>
+                <th className="px-3 py-2 text-left font-normal">{t.endpoints.title}</th>
+                <th className="px-3 py-2 text-right font-normal">{t.history.today}</th>
+                <th className="px-3 py-2 text-right font-normal">{t.history.week}</th>
+                <th className="px-3 py-2 text-right font-normal">{t.history.month}</th>
+                <th className="px-3 py-2 text-right font-normal">{t.history.saved}</th>
               </tr>
             </thead>
             <tbody>
               {accountNames.map((name) => {
                 const cur = accounts.find((a) => a.name === name)?.currency ?? null;
                 const row = data?.accounts?.[name] ?? {};
+                const saved = num(row["month"], "saved");
                 return (
                   <tr key={name} className="border-t border-[var(--line)]">
-                    <td className="max-w-[9rem] truncate py-1">{name}</td>
+                    <td className="max-w-[11rem] truncate px-3 py-2">{name}</td>
                     {(["today", "week", "month"] as const).map((p) => {
                       const b = row[p];
                       return (
-                        <td key={p} className="py-1 text-right">
+                        <td key={p} className="px-3 py-2 text-right">
                           <div>{fmtMoney(num(b, "cost"), cur ?? "")}</div>
                           <div className="text-2xs text-[var(--ink-faint)]">
-                            {fmtNum(num(b, "requests"))} · {fmtNum(tokens(b))}
+                            {fmtNum(num(b, "requests"))} · {fmtCompact(tokens(b))}
                           </div>
                         </td>
                       );
                     })}
+                    <td className="px-3 py-2 text-right text-[var(--up)]">
+                      {saved > 0 ? fmtMoney(saved, cur ?? "") : "—"}
+                    </td>
                   </tr>
                 );
               })}
+              <tr className="border-t border-[var(--line-strong)] bg-[var(--panel-2)]">
+                <td className="px-3 py-2">{t.history.totalRow}</td>
+                {(["today", "week", "month"] as const).map((p) => {
+                  const b = data?.totals?.[p];
+                  return (
+                    <td key={p} className="px-3 py-2 text-right">
+                      <div>{single ? fmtMoney(num(b, "cost"), single) : "—"}</div>
+                      <div className="text-2xs text-[var(--ink-faint)]">
+                        {fmtNum(num(b, "requests"))} · {fmtCompact(tokens(b))}
+                      </div>
+                    </td>
+                  );
+                })}
+                <td className="px-3 py-2 text-right text-[var(--up)]">
+                  {single && num(data?.totals?.["month"], "saved") > 0
+                    ? fmtMoney(num(data?.totals?.["month"], "saved"), single)
+                    : "—"}
+                </td>
+              </tr>
             </tbody>
           </table>
-        )}
+          {single ? null : (
+            <div className="mono border-t border-[var(--line)] px-3 py-2 text-2xs text-[var(--ink-faint)]">
+              {t.history.mixedCurrency}
+            </div>
+          )}
+        </div>
+      )}
 
+      {/* ---- the settings and the way out of here ---- */}
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--line)] pt-3">
         <div className="mono text-2xs text-[var(--ink-faint)]">
           {t.history.dayLine
             .replace("{off}", offset == null ? "UTC" : `UTC${offset >= 0 ? "+" : ""}${(offset / 60).toFixed(offset % 60 === 0 ? 0 : 1)}`)
             .replace("{n}", String(data?.retention_days ?? 400))}
         </div>
+        <div className="flex items-center gap-2">
+          {offset === null ? (
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => void useBrowserTime()}>
+              {t.history.tzUse.replace("{n}", String(-new Date().getTimezoneOffset()))}
+            </Button>
+          ) : null}
+          <Button size="sm" variant="outline" onClick={exportCsv} disabled={days.length === 0}>
+            {t.common.export}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

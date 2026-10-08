@@ -229,7 +229,9 @@ export function DashboardPage() {
         {/* Weights instead of equal columns: the clock and the peak-window cell need room, the token
             cell does not - an equal split wraps the window onto four lines. */}
         <div className="grid grid-cols-1 sm:grid-cols-[3fr_1fr_1.1fr_1.9fr_1fr]">
-          <div className="border-b border-[var(--line)] px-3 py-3 sm:col-span-3 sm:border-b-0 sm:border-r">
+          {/* No col-span here: the width comes from the weighted template, and a span left over from
+              the six-column layout would push the last two cells onto a second row. */}
+          <div className="border-b border-[var(--line)] px-3 py-3 sm:border-b-0 sm:border-r">
             <div className="flex items-center gap-2">
               <span
                 className={cn("h-[7px] w-[7px] rounded-full", r.peak && "live-dot")}
