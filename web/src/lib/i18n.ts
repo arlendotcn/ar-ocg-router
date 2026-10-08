@@ -105,6 +105,8 @@ const zh = {
     tzUnset: "日界目前按 UTC 划分：本地的每天 08:00 之后产生的用量会被记到第二天。设成本地时区只影响以后归档的日子，已归档的不会重排。",
     tzUse: "使用本机时区（{n} 分钟）",
     tzDone: "日界已设为 {n} 分钟。",
+    detail: "详情",
+    hide: "收起",
     dayLine: "日界 {off} · 保留 {n} 天",
   },
   dash: {
@@ -601,6 +603,8 @@ const en: Dict = {
     tzUnset: "Days are currently cut at UTC: usage after 08:00 local is filed on the next date. Setting your own offset affects only days filed from now on; days already filed are not reshuffled.",
     tzUse: "Use this browser's offset ({n} minutes)",
     tzDone: "Day boundary set to {n} minutes.",
+    detail: "Detail",
+    hide: "Hide",
     dayLine: "Day boundary {off} · {n} days kept",
   },
   dash: {

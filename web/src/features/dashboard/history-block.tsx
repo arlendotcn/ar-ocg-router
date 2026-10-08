@@ -5,50 +5,83 @@ import { useI18n } from "@/lib/i18n";
 import { api } from "@/lib/api";
 import { useToast } from "@/components/ui/toast";
 import { Button } from "@/components/ui/button";
-import { Plate, PlateBlock } from "@/components/ui/plate";
-import { fmtMoney, fmtNum, moneySymbol } from "@/lib/format";
+import { PlateBlock } from "@/components/ui/plate";
+import { fmtMoney, fmtNum } from "@/lib/format";
 import type { History, HistoryBucket } from "@/types/api";
 import { cn } from "@/lib/utils";
 
 /**
- * What the counters beside each endpoint cannot say: how much of it happened *when*.
+ * Daily history, in two layers.
  *
- * The numbers come from /router/history, which is fetched on its own cadence rather than polled with
- * the two-second statistics - a day bucket changes when a request is served, not while you watch.
+ * The overview is a fixed layout someone watches: adding a block to it pushes everything down and
+ * makes the page re-learn itself. So the numbers that fit on the existing rows go *into* them - a
+ * line under the request counter, a figure in the clock cell - and the rest (a month of bars, the
+ * per-endpoint split, the CSV) waits behind `HistoryPanel`, which is collapsed until asked for.
  *
- * Money is deliberately not summed across endpoints here. Several plans with different currencies
- * would add up to a number in no currency at all, so the aggregate shows requests and tokens, and
- * each endpoint's money is shown in its own unit beside its own name.
+ * Money is never summed across endpoints: several plans can be denominated in different currencies,
+ * and their sum would be a number in no currency at all. Each endpoint's money is shown in its own
+ * unit, and the single compact figure only appears when there is exactly one currency to speak of.
  */
 
-type Metric = "requests" | "tokens" | "cost";
+export type Metric = "requests" | "tokens" | "cost";
 
-const num = (b: HistoryBucket | undefined, k: keyof HistoryBucket) => Number(b?.[k] ?? 0);
-const tokens = (b: HistoryBucket | undefined) => num(b, "prompt_tokens") + num(b, "completion_tokens");
+export const num = (b: HistoryBucket | undefined, k: keyof HistoryBucket) => Number(b?.[k] ?? 0);
+export const tokens = (b: HistoryBucket | undefined) =>
+  num(b, "prompt_tokens") + num(b, "completion_tokens");
 const metricOf = (b: HistoryBucket | undefined, m: Metric) =>
   m === "requests" ? num(b, "requests") : m === "tokens" ? tokens(b) : num(b, "cost");
 
-export function HistoryBlock({ accounts }: { accounts: { name: string; currency: string }[] }) {
-  const { t, lang } = useI18n();
-  const toast = useToast();
-  const [span, setSpan] = React.useState(30);
-  const [metric, setMetric] = React.useState<Metric>("requests");
+/** Fetch the history on its own cadence: a day bucket changes when a request is served. */
+export function useHistory(span: number) {
   const [data, setData] = React.useState<History | null>(null);
-  // undefined = not asked yet, null = asked and unset (filed by UTC).
-  const [offset, setOffset] = React.useState<number | null | undefined>(undefined);
-  const [busy, setBusy] = React.useState(false);
-
   React.useEffect(() => {
     let alive = true;
     const load = () => {
       api.history(span)
         .then((h) => { if (alive) setData(h); })
-        .catch(() => { /* the block keeps whatever it last showed */ });
+        .catch(() => { /* keep whatever was last shown */ });
     };
     load();
     const id = window.setInterval(load, 60_000);
     return () => { alive = false; window.clearInterval(id); };
   }, [span]);
+  return { data, span };
+}
+
+/** The one number a single-currency install can put on an existing row; null when it is a mix. */
+export function onlyCurrency(
+  data: History | null,
+  accounts: { name: string; currency: string }[],
+): string | null {
+  const seen = new Set(accounts.map((a) => a.currency).filter((c) => c && c.trim() !== ""));
+  if (seen.size !== 1) return null;
+  // A day rebuilt from the ledger has money that belongs to no endpoint, so a single-currency figure
+  // would be missing exactly that part. It is shown only when the day was counted as it happened.
+  if (data?.days?.[data.days.length - 1]?.backfilled) return null;
+  return [...seen][0] ?? null;
+}
+
+export function HistoryPanel({
+  data,
+  span,
+  setSpan,
+  metric,
+  setMetric,
+  accounts,
+  onClose,
+}: {
+  data: History | null;
+  span: number;
+  setSpan: (n: number) => void;
+  metric: Metric;
+  setMetric: (m: Metric) => void;
+  accounts: { name: string; currency: string }[];
+  onClose: () => void;
+}) {
+  const { t } = useI18n();
+  const toast = useToast();
+  const [offset, setOffset] = React.useState<number | null | undefined>(undefined);
+  const [busy, setBusy] = React.useState(false);
 
   React.useEffect(() => {
     api.config()
@@ -72,18 +105,7 @@ export function HistoryBlock({ accounts }: { accounts: { name: string; currency:
     }
   };
 
-  const currencies = React.useMemo(
-    () => Array.from(new Set(accounts.map((a) => a.currency).filter((c) => c && c.trim() !== ""))),
-    [accounts],
-  );
-  const single = currencies.length === 1 ? currencies[0] : null;
-
-  const cards: { key: string; label: string; now?: HistoryBucket; before?: HistoryBucket }[] = [
-    { key: "today", label: t.history.today, now: data?.totals?.today, before: data?.totals?.yesterday },
-    { key: "week", label: t.history.week, now: data?.totals?.week, before: data?.totals?.week_prev },
-    { key: "month", label: t.history.month, now: data?.totals?.month, before: data?.totals?.month_prev },
-  ];
-
+  const single = onlyCurrency(data, accounts);
   const days = data?.days ?? [];
   const peak = Math.max(1, ...days.map((d) => metricOf(d.bucket, metric)));
   const accountNames = Object.keys(data?.accounts ?? {}).sort();
@@ -104,13 +126,6 @@ export function HistoryBlock({ accounts }: { accounts: { name: string; currency:
 
   const fmt = (v: number, m: Metric, currency?: string | null) =>
     m === "cost" ? (currency ? fmtMoney(v, currency) : v.toFixed(2)) : fmtNum(v);
-  const delta = (now?: HistoryBucket, before?: HistoryBucket) => {
-    const a = metricOf(now, metric);
-    const b = metricOf(before, metric);
-    if (b <= 0) return null;
-    const pct = ((a - b) / b) * 100;
-    return pct;
-  };
 
   return (
     <PlateBlock title={t.history.title} hint={t.history.help}>
@@ -124,33 +139,10 @@ export function HistoryBlock({ accounts }: { accounts: { name: string; currency:
           </div>
         ) : null}
 
-        {/* Aggregates. Each card compares against the same span of the period before it. */}
-        <div className="grid grid-cols-3 gap-3">
-          {cards.map((c) => {
-            const d = delta(c.now, c.before);
-            const primary = metric === "cost" && single ? fmt(num(c.now, "cost"), "cost", single) : fmtNum(num(c.now, "requests"));
-            const secondary = metric === "cost" && single ? `${fmtNum(num(c.now, "requests"))} ${t.history.requests}` : `${fmtNum(tokens(c.now))} tok`;
-            return (
-              <div key={c.key} className="min-w-0">
-                <div className="label">{c.label}</div>
-                <div className="mono mt-0.5 truncate text-lg leading-tight">{primary}</div>
-                <div className="mono mt-0.5 truncate text-2xs text-[var(--ink-faint)]">{secondary}</div>
-                {d === null ? null : (
-                  <div className={cn("mono mt-0.5 text-2xs", d >= 0 ? "text-[var(--up)]" : "text-[var(--ink-faint)]")}>
-                    {d >= 0 ? "+" : ""}{d.toFixed(0)}% {t.history.vsPrev}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-
-        {/* The bars. Height is relative to the busiest day in the window, so a quiet month still shows
-            its shape rather than a flat line at the top. */}
         <div>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex gap-1">
-              {(["requests", "tokens", ...(single ? (["cost"] as const) : [])] as Metric[]).map((m) => (
+              {(["requests", "tokens", ...(single ? (["cost"] as Metric[]) : [])] as Metric[]).map((m) => (
                 <button
                   key={m}
                   type="button"
@@ -185,6 +177,9 @@ export function HistoryBlock({ accounts }: { accounts: { name: string; currency:
               <Button size="sm" variant="ghost" onClick={exportCsv} disabled={days.length === 0}>
                 {t.common.export}
               </Button>
+              <Button size="sm" variant="ghost" onClick={onClose}>
+                {t.common.close}
+              </Button>
             </div>
           </div>
 
@@ -215,8 +210,6 @@ export function HistoryBlock({ accounts }: { accounts: { name: string; currency:
           </div>
         </div>
 
-        {/* Per endpoint: money in the endpoint's own currency, which is why this is a table and the
-            aggregate above is not. */}
         {accountNames.length === 0 ? null : (
           <table className="mono w-full text-xs">
             <thead>

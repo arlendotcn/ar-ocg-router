@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Meter } from "@/components/ui/meter";
 import { Plate, PlateBlock, Readout } from "@/components/ui/plate";
 import { PageHeader } from "@/components/page-header";
-import { HistoryBlock } from "./history-block";
+import { HistoryPanel, onlyCurrency, num, tokens, useHistory, type Metric } from "./history-block";
 
 import { fmtBytes, fmtAgo, fmtDuration, fmtMoney, fmtNum, fmtPct, fmtWhen, moneySymbol } from "@/lib/format";
 import type { Account } from "@/types/api";
@@ -31,6 +31,16 @@ export function DashboardPage() {
   // hang over the plates below on a phone, and window.confirm would take the decision off screen.
   const [resetArmed, setResetArmed] = React.useState(false);
   const [resetting, setResetting] = React.useState(false);
+  // Daily history: the few figures that fit the existing rows, and the detail block behind a toggle.
+  const [histSpan, setHistSpan] = React.useState(30);
+  const [histOpen, setHistOpen] = React.useState(false);
+  const [histMetric, setHistMetric] = React.useState<Metric>("requests");
+  const { data: hist } = useHistory(histSpan);
+  const endpointCurrencies = React.useMemo(
+    () => (stats?.accounts ?? []).map((a) => ({ name: a.name, currency: a.stats.currency })),
+    [stats],
+  );
+  const histSingle = onlyCurrency(hist, endpointCurrencies);
   // A pending quota calibration is cleared by a statistics reset (its baseline counters are zeroed
   // with everything else), so the armed reset must say so before the user confirms.
   const calPending =
@@ -226,6 +236,16 @@ export function DashboardPage() {
               {r.peak ? t.dash.peak : t.dash.offpeak}
             </div>
             <div className="mt-2 text-xs text-[var(--ink-faint)]">{fmtWhen(r.now, lang)}</div>
+            {/* Today's usage, on the row that already says what day it is. The money figure is
+                absent when the endpoints do not share a currency - see onlyCurrency. */}
+            <div className="mono mt-1 flex flex-wrap items-baseline gap-x-2 text-xs text-[var(--ink-dim)]">
+              <span className="label">{t.history.today}</span>
+              <span>{fmtNum(num(hist?.totals?.today, "requests"))} {t.history.requests}</span>
+              <span className="text-[var(--ink-faint)]">{fmtNum(tokens(hist?.totals?.today))} tok</span>
+              {histSingle ? (
+                <span>{fmtMoney(num(hist?.totals?.today, "cost"), histSingle)}</span>
+              ) : null}
+            </div>
           </div>
           <Readout
             label={t.dash.nextChange}
@@ -254,8 +274,26 @@ export function DashboardPage() {
           <Readout
             label={t.dash.requests}
             value={fmtNum(c.requests)}
-            sub={`${t.dash.proxied} ${fmtNum(c.proxied)} · ${t.dash.errors} ${fmtNum(c.errors)}`}
             help={t.dash.lifetimeHint}
+            sub={
+              <>
+                <div>{`${t.dash.proxied} ${fmtNum(c.proxied)} · ${t.dash.errors} ${fmtNum(c.errors)}`}</div>
+                {/* The time dimension the lifetime counter cannot express, on the row it belongs
+                    to - and the way into the rest of it. */}
+                <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2">
+                  <span>{t.history.today} {fmtNum(num(hist?.totals?.today, "requests"))}</span>
+                  <span>{t.history.week} {fmtNum(num(hist?.totals?.week, "requests"))}</span>
+                  <span>{t.history.month} {fmtNum(num(hist?.totals?.month, "requests"))}</span>
+                  <button
+                    type="button"
+                    onClick={() => setHistOpen((v) => !v)}
+                    className="mono underline decoration-dotted underline-offset-2 hover:text-[var(--ink)]"
+                  >
+                    {histOpen ? t.history.hide : t.history.detail}
+                  </button>
+                </div>
+              </>
+            }
           />
         </Plate>
         <Plate className="rise">
@@ -267,10 +305,18 @@ export function DashboardPage() {
         </Plate>
       </div>
 
-      {/* ---- daily history: what the counters above cannot say, which is *when* ---- */}
-      <HistoryBlock
-        accounts={(stats?.accounts ?? []).map((a) => ({ name: a.name, currency: a.stats.currency }))}
-      />
+      {/* ---- daily history, behind a toggle: the overview keeps the layout it had ---- */}
+      {histOpen ? (
+        <HistoryPanel
+          data={hist}
+          span={histSpan}
+          setSpan={setHistSpan}
+          metric={histMetric}
+          setMetric={setHistMetric}
+          accounts={endpointCurrencies}
+          onClose={() => setHistOpen(false)}
+        />
+      ) : null}
 
       {/* ---- per side summary ---- */}
       <div className="grid gap-3 sm:grid-cols-2">
