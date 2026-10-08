@@ -25,6 +25,12 @@ export type Metric = "requests" | "tokens" | "cost";
 export const num = (b: HistoryBucket | undefined, k: keyof HistoryBucket) => Number(b?.[k] ?? 0);
 export const tokens = (b: HistoryBucket | undefined) =>
   num(b, "prompt_tokens") + num(b, "completion_tokens");
+/** Share of the input that was served from cache, as the endpoint rows already report it. */
+const hitRate = (b: HistoryBucket | undefined) => {
+  const input = num(b, "prompt_tokens");
+  return input > 0 ? ((num(b, "cached_tokens") / input) * 100).toFixed(1) + "%" : "—";
+};
+
 const metricOf = (b: HistoryBucket | undefined, m: Metric) =>
   m === "requests" ? num(b, "requests") : m === "tokens" ? tokens(b) : num(b, "cost");
 
@@ -198,6 +204,14 @@ export function HistoryPanel({
               <div className="mono mt-1.5 text-2xs text-[var(--ink-faint)]">
                 {fmtNum(num(now, "requests"))} {t.history.requests} · {fmtCompact(tokens(now))} {t.history.tokenUnit}
               </div>
+              {/* The two token kinds and the cache rate: the totals above say how much, these say
+                  what it was made of - and cached input is the cheap kind. */}
+              <div className="mono mt-0.5 text-2xs text-[var(--ink-faint)]">
+                {t.history.inTokens} {fmtCompact(num(now, "prompt_tokens"))} · {t.history.outTokens} {fmtCompact(num(now, "completion_tokens"))}
+              </div>
+              <div className="mono mt-0.5 text-2xs text-[var(--ink-dim)]" title={t.history.cacheHint}>
+                {t.history.cacheHit} {fmtCompact(num(now, "cached_tokens"))} · {hitRate(now)}
+              </div>
               {saved.length === 0 ? null : (
                 <div className="mono mt-0.5 text-2xs text-[var(--up)]">
                   {t.history.saved} {saved.join(" · ")}
@@ -257,12 +271,30 @@ export function HistoryPanel({
             ) : (
               days.map((d) => {
                 const v = metricOf(d.bucket, metric);
-                const h = v <= 0 ? 0 : Math.max(2, Math.round((v / peak) * 100));
+                const pctOf = (x: number) => (x <= 0 ? 0 : Math.max(1, Math.round((x / peak) * 100)));
+                const tip = `${d.date} · ${fmt(v, metric, single)} · ${num(d.bucket, "requests")} ${t.history.requests}${d.backfilled ? ` · ${t.history.backfilled}` : ""}`;
+                // On the token metric the bar is split into what the tokens actually were: input
+                // that missed the cache, input that hit it, and output. Cached input is a subset of
+                // the input, so the three parts add up to the day without counting anything twice.
+                if (metric === "tokens") {
+                  const hit = num(d.bucket, "cached_tokens");
+                  const miss = Math.max(0, num(d.bucket, "prompt_tokens") - hit);
+                  const out = num(d.bucket, "completion_tokens");
+                  return (
+                    // h-full: the segments are percentages, and a percentage of an auto-height box is
+                    // zero - which is a chart with no bars in it.
+                    <div key={d.date} title={tip} className="flex h-full min-w-0 flex-1 flex-col justify-end gap-[1px]">
+                      <div style={{ height: `${pctOf(out)}%` }} className="rounded-t-[1px] bg-[var(--ink-faint)]/60" />
+                      <div style={{ height: `${pctOf(hit)}%` }} className="bg-[var(--signal)]/35" />
+                      <div style={{ height: `${pctOf(miss)}%` }} className="bg-[var(--signal)]/75" />
+                    </div>
+                  );
+                }
                 return (
                   <div
                     key={d.date}
-                    title={`${d.date} · ${fmt(v, metric, single)} · ${num(d.bucket, "requests")} ${t.history.requests}${d.backfilled ? ` · ${t.history.backfilled}` : ""}`}
-                    style={{ height: `${h}%` }}
+                    title={tip}
+                    style={{ height: `${pctOf(v)}%` }}
                     className={cn(
                       "min-w-0 flex-1 rounded-t-[1px] transition-colors hover:brightness-125",
                       d.backfilled ? "bg-[var(--ink-faint)]/45" : "bg-[var(--signal)]/70",
@@ -276,12 +308,30 @@ export function HistoryPanel({
             <span>{days[0]?.date ?? ""}</span>
             <span>{days[days.length - 1]?.date ?? ""}</span>
           </div>
-          {anyBackfilled ? (
-            <div className="mono mt-2 flex items-center gap-1.5 text-2xs text-[var(--ink-faint)]">
-              <span className="inline-block h-2 w-2 rounded-[1px] bg-[var(--ink-faint)]/45" />
-              {t.history.backfilled}
-            </div>
-          ) : null}
+          <div className="mono mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-[var(--ink-faint)]">
+            {metric === "tokens" ? (
+              <>
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block h-2 w-2 rounded-[1px] bg-[var(--signal)]/75" />
+                  {t.history.inTokens} ({t.history.cacheMiss})
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block h-2 w-2 rounded-[1px] bg-[var(--signal)]/35" />
+                  {t.history.cacheHit}
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block h-2 w-2 rounded-[1px] bg-[var(--ink-faint)]/60" />
+                  {t.history.outTokens}
+                </span>
+              </>
+            ) : null}
+            {anyBackfilled ? (
+              <span className="flex items-center gap-1.5" title={t.history.backfilled}>
+                <span className="inline-block h-2 w-2 rounded-[1px] bg-[var(--ink-faint)]/45" />
+                {t.history.backfilledShort}
+              </span>
+            ) : null}
+          </div>
         </div>
       </div>
 
@@ -310,9 +360,11 @@ export function HistoryPanel({
                       const b = row[p];
                       return (
                         <td key={p} className="px-3 py-2 text-right">
-                          <div>{fmtMoney(num(b, "cost"), cur ?? "")}</div>
+                          <div title={`${t.history.inTokens} ${fmtNum(num(b, "prompt_tokens"))} · ${t.history.outTokens} ${fmtNum(num(b, "completion_tokens"))}`}>
+                            {fmtMoney(num(b, "cost"), cur ?? "")}
+                          </div>
                           <div className="text-2xs text-[var(--ink-faint)]">
-                            {fmtNum(num(b, "requests"))} · {fmtCompact(tokens(b))}
+                            {fmtNum(num(b, "requests"))} · {fmtCompact(tokens(b))} · {hitRate(b)}
                           </div>
                         </td>
                       );
@@ -329,9 +381,11 @@ export function HistoryPanel({
                   const b = data?.totals?.[p];
                   return (
                     <td key={p} className="px-3 py-2 text-right">
-                      <div>{single ? fmtMoney(num(b, "cost"), single) : "—"}</div>
+                      <div title={`${t.history.inTokens} ${fmtNum(num(b, "prompt_tokens"))} · ${t.history.outTokens} ${fmtNum(num(b, "completion_tokens"))}`}>
+                        {single ? fmtMoney(num(b, "cost"), single) : "—"}
+                      </div>
                       <div className="text-2xs text-[var(--ink-faint)]">
-                        {fmtNum(num(b, "requests"))} · {fmtCompact(tokens(b))}
+                        {fmtNum(num(b, "requests"))} · {fmtCompact(tokens(b))} · {hitRate(b)}
                       </div>
                     </td>
                   );
