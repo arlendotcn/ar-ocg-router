@@ -1,5 +1,5 @@
 # ============================================================================
-#  ar-OCG-Router  (code name: ar-ocg-router)  v0.0.1
+#  ar-OCG-Router  (code name: ar-ocg-router)  v1.0.0
 #  配置模板：把 sk-REPLACE_ME 换成自己的 key
 # ============================================================================
 #
@@ -33,6 +33,13 @@ log:
   # "<str:N>"). Some upstreams answer "a parameter specified in the request is not valid" and do not
   # say which one - this is the only way to find out. Leave it off unless you are chasing that.
   # dump_error_request: false
+
+# 按天归档的用量统计。日界 = 你所在地的午夜；路由器没有时区数据库，所以这里只能配，
+# 不能猜。不写这一项则按 UTC 划分（UTC+8 的机器会把本地每天 08:00 之后的用量记到第二天），
+# 控制台「用量统计」里有一键改成浏览器时区的按钮。改它只影响此后归档的日子，已归档的不重排。
+stats:
+  utc_offset_minutes: 480   # 东经分钟偏移；480 = UTC+8
+  retention_days: 400       # 保留天数
 
 router:
   mode: auto                 # auto | plans | fallback
