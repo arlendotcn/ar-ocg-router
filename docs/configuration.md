@@ -337,6 +337,52 @@ Read it from `GET /router/history?days=30[&account=name]`. It is deliberately **
 `/router/stats`, which the console polls every two seconds: a day bucket changes when a request is
 served, not while you watch.
 
+## Pointing a client at the router (Codex, and anything else)
+
+A coding agent that holds its own credentials - a subscription, an OAuth session, a login - does not
+need the router to hold them. Point the agent at the router, give it one of the router's own keys, and
+let the router forward: the token lifecycle stays entirely with the agent, which is the one part the
+router has no business managing.
+
+```toml
+# ~/.codex/config.toml
+model_provider = "ar-ocg-router"
+
+[model_providers.ar-ocg-router]
+name     = "ar-ocg-router"
+base_url = "http://127.0.0.1:8787/v1"
+env_key  = "AR_OCG_ROUTER_KEY"
+wire_api = "chat"            # "responses" only if every endpoint you route to speaks it
+```
+
+```bash
+# this key is one of server.client_keys in the router's own config, not a provider key
+export AR_OCG_ROUTER_KEY="<your client key>"
+```
+
+What serves the request is decided by the model name alone:
+
+| `model` sent by the client | What happens |
+| --- | --- |
+| `ar-ocg-router` | The router decides, by policy. Nothing is pinned. |
+| `<endpoint>` | That endpoint, using the model id in its own `model:` field. |
+| `<endpoint>/<model id>` | That endpoint, with that model id - the way to reach an endpoint while naming a model it was not configured for. |
+
+Pinning **overrides the endpoint's `enabled: false`**, and that is deliberate: disabled means "do not
+route here on your own", not "unreachable". A pinned request bypasses the policy that would otherwise
+choose it; if the upstream itself fails it still gets the normal retry and failover, and it is *not*
+counted against the endpoint's skip streak. So an endpoint that exists only to be pinned is configured
+`enabled: false` and kept out of the normal path.
+
+Two things worth knowing:
+
+- **The client's model list does not come from here.** `GET /v1/models` answers with a single id
+  (`ar-ocg-router`); a client with its own list (Codex ships one) keeps showing its own names, and they
+  resolve through the table above.
+- **Failover can cross protocols.** If a pinned chat endpoint fails and the router falls back to
+  another, protocol compatibility is only what the endpoints declare in `mode`. Keep a client that
+  speaks one `wire_api` pinned to endpoints that speak the same one.
+
 ## Compatibility layer
 
 Zero rewriting by default: apart from `model`, the request body is forwarded verbatim and

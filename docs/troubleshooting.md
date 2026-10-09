@@ -84,6 +84,28 @@ as `unknown top-level section` and otherwise ignored.
 - If a counter never moves at all, check that the tab is not suspended in the background and
   that the endpoint actually served the request (`x-router-account` in the response).
 
+## A pinned client gets 401 while everything else works
+
+The two causes look identical and are opposite in nature:
+
+1. **The router rejected it.** `server.client_keys` is set and the client's key is not in it. The router
+   records nothing about the request body; compare the status the *client* reports with the router log
+   from the same second.
+2. **The upstream rejected it.** The endpoint's own credential (a subscription token, a bridge's key)
+   has expired. Only that endpoint is affected.
+
+Telling them apart:
+
+- Wrong router key -> the failure is immediate and identical for **every** endpoint, and `GET /health`
+  still answers `ok` (it is unauthenticated on purpose).
+- Expired upstream credential -> one endpoint fails, the others serve, and that endpoint shows a
+  quota/auth cooldown in the console (`auth_cooldown_secs`, 10 minutes by default).
+
+If the credential belongs to a client-side subscription - a coding agent that authenticates itself and
+points at the router as a plain OpenAI upstream - then the router never sees that credential and
+**cannot** refresh it: the agent owns the token lifecycle. A 401 that always pins on the same endpoint
+is the agent's own session expiring. Sign in again there, not here.
+
 ## Uninstalling
 
 `service.ps1 uninstall` (Windows) or `install.sh uninstall` (Linux) removes the service and
