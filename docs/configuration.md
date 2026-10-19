@@ -327,7 +327,7 @@ change often and does not report a cost per request, so fill those in from your 
 | `peak_windows` | `Mon-Fri 01:00-04:00, 06:00-10:00 UTC` | Syntax `<day> <HH:MM-HH:MM>[, ...] [timezone]`, groups separated by `;`. |
 | `idle_prefer` | `surplus_first` | `surplus_first` keeps using prepaid quota that would otherwise expire, deferring to half-price cash only when it is tight. `plans` and `fallback` are hard policies. |
 | `surplus_max_pct` | 80 | Any window at or above this percentage counts as tight. |
-| `surplus_projection` | true | Extrapolate linearly along the window; a plan that will not be used up still counts as surplus. |
+| `surplus_projection` | true | Extrapolate linearly along the window; a plan that will not be used up still counts as surplus. See [what projection actually does](#what-surplus_projection-actually-does) — it is not a blanket extrapolation. |
 | `exhaust_at_pct` | 99 | At this percentage the plan stops being preferred. |
 | `session_affinity` | true | Keep one conversation on one endpoint to preserve upstream session and cache semantics. |
 | `session_affinity_ttl_secs` | 1800 | Binding expiry. |
@@ -341,6 +341,38 @@ change often and does not report a cost per request, so fill those in from your 
 | `retry_on_model_error` | true | Treat "model not found" as a failover trigger. Model ids differ between providers, so this matters. |
 | `inject_stream_usage` | false | Add `stream_options.include_usage` to streaming chat requests. |
 | `quota_refresh_secs` | 60 | Background quota poll interval (an endpoint's own value overrides it). |
+
+### What `surplus_projection` actually does
+
+The projection answers one question: *at the current rate, how much of this window will be
+used by the time it ends?*
+
+```
+fraction_elapsed  = (time since the window started) / (window length)   # floored at 8%
+projected_percent = current_percent / fraction_elapsed
+```
+
+It exists so that `surplus_max_pct` keeps its meaning early in a cycle. Without it, 70% used
+on day 5 of a 31-day window still reads as "below 80%, plenty left", the plan keeps being
+preferred, and the allowance is gone halfway through the month — leaving only cash endpoints for
+the rest of it. With it, that same 70% projects to ~430% and the plan is treated as tight
+straight away.
+
+Three limits are worth knowing, because they decide when the number simply is not there:
+
+1. **It only affects idle ordering.** `surplus` is consulted when `idle_prefer: surplus_first`
+   is deciding what to use off-peak. Peak ordering and the `plans`/`fallback` hard policies do
+   not consult it at all.
+2. **A ledger that did not observe the whole window reports no projection.** The extrapolation
+   divides what was *measured* by the elapsed part of the window, so a ledger that started
+   yesterday inside a month-long cycle would report a rate it never observed. In that case the
+   real percentage is reported, `projected_percent` equals it, and the reset countdown still
+   appears. A fresh install, a cleared ledger or a restart mid-cycle all land here.
+3. **From the local ledger, only the monthly window extrapolates.** Rolling windows (5h, weekly)
+   have no knowable start, so the local path assumes observation began just now and projects
+   nothing. When the provider's `/usage` answers, all three windows carry a reset instant and
+   all three are projected — the difference is which source the numbers came from, visible as
+   `quota.source` (`remote` vs `local`).
 
 ## Usage history
 
