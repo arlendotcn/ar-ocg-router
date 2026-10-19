@@ -84,13 +84,17 @@ plans:
     url: https://opencode.ai/zen/go/v1
     provider: opencodego
     key: sk-REPLACE_ME
-    model: deepseek-flash
-    mode: both
+    # Go 目录里的正式 id；deepseek-flash 是它的别名，两者目前都可用。
+    model: deepseek-v4.1-flash
+    # Go 用同一个前缀服务三种协议（实测确认）。"both" 只含两种 OpenAI 形状，
+    # 想让 Claude Code 之类的 Anthropic 客户端走这里就必须显式列出 anthropic-messages。
+    mode: openai-completion,openai-responses,anthropic-messages
     order: 10
     inject_session: true                      # Go 要求 x-opencode-session，显式开启
-    # Go 的额度窗口：5h / 周 / 月，单位美元。不写就用内置的非促销默认值（3 / 7.5 / 15）。
-    # 促销期额度更大（例如 12 / 30 / 60）；促销会结束，所以写在配置里、而不是编译进二进制。
-    quota: { unit: usd, rolling: 12, weekly: 30, monthly: 60, probe: usage }
+    # Go 的额度窗口：5h / 周 / 月，单位美元。三窗口固定为月上限的 20% / 50% / 100%，
+    # 但月上限按模型不同、且随促销变化，所以必须写在配置里而不是编译进二进制。
+    # 下面按 DeepSeek V4.1 Flash 的 $80/月填写；改额度时记得三档一起改。
+    quota: { unit: usd, rolling: 16, weekly: 40, monthly: 80, probe: usage }
     # 订阅套餐（如火山方舟 Coding / Agent Plan）每期把额度重置为满额，重置日 = 购买日。
     # 配 cycle_day 后月窗口按「本周期累计」算，控制台也能显示与厂商一致的重置倒计时。
     # 不配（或 0）= 月窗口按 30 天滚动累计（按量计费端点用这个）。

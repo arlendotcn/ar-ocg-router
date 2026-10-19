@@ -28,19 +28,21 @@ plans:
     url: https://opencode.ai/zen/go/v1
     provider: opencodego
     key: sk-...
-    model: deepseek-flash
-    mode: both
+    model: deepseek-v4.1-flash
+    mode: openai-completion,openai-responses,anthropic-messages
     order: 10
     inject_session: true
-    quota: { unit: usd, rolling: 12, weekly: 30, monthly: 60, probe: usage }
+    quota: { unit: usd, rolling: 16, weekly: 40, monthly: 80, probe: usage }
 
 fallback:
   - name: ds-official-flash
     url: https://api.deepseek.com
+    # Anthropic lives under its own prefix here, so it needs the separate base below.
+    anthropic_url: https://api.deepseek.com/anthropic
     provider: deepseek
     key: sk-...
     model: deepseek-flash
-    mode: both
+    mode: openai-completion,openai-responses,anthropic-messages
     order: 10
     rule: [offpeak, quota_low]
     quota: { probe: balance }
@@ -55,7 +57,7 @@ fallback:
 | `url` | Upstream prefix, no trailing slash. |
 | `key` | Literal, `env:VAR`, or `file:/path/key.txt`. |
 | `model` | **Required.** The only model id this endpoint ever sends, verbatim. A wrong id fails upstream and the router moves on. |
-| `mode` | `openai-completion` / `openai-responses` / `anthropic-messages` / `both` / `any`, or a list. **Declare only the protocols the endpoint really serves**: the router treats `mode` as your statement of fact, and a wrong declaration sends requests to a path the upstream does not have. |
+| `mode` | `openai-completion` / `openai-responses` / `anthropic-messages` / `both` / `any`, or a list. **`both` means the two OpenAI shapes and does *not* include `anthropic-messages`** — an Anthropic client (Claude Code, say) will skip the endpoint entirely unless you write `anthropic-messages` or `any`. **Declare only the protocols the endpoint really serves**: the router treats `mode` as your statement of fact, and a wrong declaration sends requests to a path the upstream does not have. |
 | `anthropic_url` | Prefix used for `anthropic-messages` requests only; every other protocol keeps using `url`. For vendors that hang different protocols off different paths — DeepSeek serves OpenAI shapes from `https://api.deepseek.com` and Anthropic messages from `https://api.deepseek.com/anthropic`. Omitted = every protocol uses `url` (the old behaviour). See below. |
 | `order` | Consumption order inside its list; smaller goes first. Derived from the position of the entry, and rewritten that way on every save — arrange it in the console instead of editing it here. |
 | `rule` | `fallback` only: conditions under which it may be *preferred*. See below. |
@@ -305,8 +307,8 @@ Reference rates (provider / model → rates), verified on the dates shown:
 | --- | --- | --- | --- | --- | --- | --- |
 | DeepSeek official | deepseek-flash | CNY | 1 | 0.02 | 4 | ×2 |
 | DeepSeek official | deepseek-v4-pro | CNY | 4.5 | 0.15 | 13.5 | ×2 |
-| OpenCode Go | deepseek-flash | USD | 0.15 | 0.003 | 0.60 | — |
-| OpenCode Go | deepseek-v4-pro | USD | 0.66 | 0.022 | 1.98 | — |
+| OpenCode Go | deepseek-v4.1-flash | USD | 0.15 | 0.003 | 0.60 | ×2 |
+| OpenCode Go | deepseek-v4-pro | USD | 0.66 | 0.022 | 1.98 | ×2 |
 | OpenCode Go | glm-5.3-flash | USD | 0.15 | 0.015 | 0.50 | — |
 | OpenCode Go | glm-5.3 | USD | 1.40 | 0.26 | 4.40 | — |
 | OpenCode Go | kimi-k3 | USD | 3.00 | 0.30 | 15.00 | — |

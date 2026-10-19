@@ -28,19 +28,21 @@ plans:
     url: https://opencode.ai/zen/go/v1
     provider: opencodego
     key: sk-...
-    model: deepseek-flash
-    mode: both
+    model: deepseek-v4.1-flash
+    mode: openai-completion,openai-responses,anthropic-messages
     order: 10
     inject_session: true
-    quota: { unit: usd, rolling: 12, weekly: 30, monthly: 60, probe: usage }
+    quota: { unit: usd, rolling: 16, weekly: 40, monthly: 80, probe: usage }
 
 fallback:
   - name: ds-official-flash
     url: https://api.deepseek.com
+    # 官方的 Anthropic 协议挂在独立前缀下，所以需要下面这个单独的 base。
+    anthropic_url: https://api.deepseek.com/anthropic
     provider: deepseek
     key: sk-...
     model: deepseek-flash
-    mode: both
+    mode: openai-completion,openai-responses,anthropic-messages
     order: 10
     rule: [offpeak, quota_low]
     quota: { probe: balance }
@@ -55,7 +57,7 @@ fallback:
 | `url` | 上游前缀，末尾不带 `/`。 |
 | `key` | 明文、`env:VAR` 或 `file:/path/key.txt`。 |
 | `model` | **必填。** 该端点唯一会发出的模型 id，原样透传。写错会在上游报错并自动换下一个。 |
-| `mode` | `openai-completion` / `openai-responses` / `anthropic-messages` / `both` / `any`，也可写列表。**只写端点真的支持的协议**：路由器的 `mode` 是声明，不是保证，声明错了就会把请求发到上游不存在的路径上。 |
+| `mode` | `openai-completion` / `openai-responses` / `anthropic-messages` / `both` / `any`，也可写列表。**`both` 只含两种 OpenAI 形状，不包含 `anthropic-messages`**——写 `both` 时 Anthropic 客户端（如 Claude Code）会完全跳过这个端点，除非显式写 `anthropic-messages` 或 `any`。**并且只写端点真的支持的协议**：路由器的 `mode` 是声明，不是保证，声明错了就会把请求发到上游不存在的路径上。 |
 | `anthropic_url` | 仅 `anthropic-messages` 请求改用这个前缀，其余协议仍走 `url`。厂商把不同协议挂在**不同路径前缀**下时用，例如 DeepSeek 官方的 OpenAI 在 `https://api.deepseek.com`、Anthropic 在 `https://api.deepseek.com/anthropic`。不写 = 所有协议都用 `url`（旧行为）。见下。 |
 | `order` | 同一列表内的消耗顺序，越小越先。由条目位置推导，每次保存都会按位置重写——请在控制台里拖拽调整，不要手改。 |
 | `rule` | 仅 `fallback`：允许它**作为首选**的条件。见下。 |
@@ -263,8 +265,8 @@ prices: { currency: CNY, input: 1, output: 4, cached_input: 0.02, peak_multiplie
 | --- | --- | --- | --- | --- | --- | --- |
 | DeepSeek 官方 | deepseek-flash | CNY | 1 | 0.02 | 4 | ×2 |
 | DeepSeek 官方 | deepseek-v4-pro | CNY | 4.5 | 0.15 | 13.5 | ×2 |
-| OpenCode Go | deepseek-flash | USD | 0.15 | 0.003 | 0.60 | — |
-| OpenCode Go | deepseek-v4-pro | USD | 0.66 | 0.022 | 1.98 | — |
+| OpenCode Go | deepseek-v4.1-flash | USD | 0.15 | 0.003 | 0.60 | ×2 |
+| OpenCode Go | deepseek-v4-pro | USD | 0.66 | 0.022 | 1.98 | ×2 |
 | OpenCode Go | glm-5.3-flash | USD | 0.15 | 0.015 | 0.50 | — |
 | OpenCode Go | glm-5.3 | USD | 1.40 | 0.26 | 4.40 | — |
 | OpenCode Go | kimi-k3 | USD | 3.00 | 0.30 | 15.00 | — |

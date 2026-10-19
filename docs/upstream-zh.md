@@ -20,9 +20,15 @@ DeepSeek 官方与 OpenCode Go 共用同一窗口。
 | 上游 | Base URL | 协议 |
 | --- | --- | --- |
 | DeepSeek 官方 | `https://api.deepseek.com` | `/chat/completions`、`/responses` |
-| OpenCode Go | `https://opencode.ai/zen/go/v1` | `/chat/completions`、`/responses` |
+| DeepSeek 官方（Anthropic） | `https://api.deepseek.com/anthropic` | `/v1/messages` |
+| OpenCode Go | `https://opencode.ai/zen/go/v1` | `/chat/completions`、`/responses`、`/messages` |
 
 Go 的前缀是 `/zen/go/v1`，**不是** `/zen/v1`（后者是 Zen 按量付费产品）。
+
+DeepSeek 的 Anthropic 协议挂在独立的 `/anthropic` 前缀下，所以端点需要单独的
+`anthropic_url` 字段（见[配置](configuration-zh.md)）。Go 则用同一个前缀服务三种协议——
+这一点用有效 key 实测过；官方 Endpoints 表给 DeepSeek V4.1 Flash 只列了
+`chat/completions`，是低估了的。
 
 ## OpenCode Go 的两个硬性要求
 
@@ -35,11 +41,14 @@ Go 的前缀是 `/zen/go/v1`，**不是** `/zen/v1`（后者是 Zen 按量付费
 
 OpenCode Go 暴露三个独立窗口（月度上限的占比）：
 
-| 窗口 | 占比 | 额度 $60 的套餐 |
+| 窗口 | 占比 | 额度 $80 的套餐 |
 | --- | --- | --- |
-| 5 小时滚动 | 20% | $12 |
-| 周 | 50% | $30 |
-| 月 | 100% | $60 |
+| 5 小时滚动 | 20% | $16 |
+| 周 | 50% | $40 |
+| 月 | 100% | $80 |
+
+占比是固定的（月上限的 20% / 50% / 100%），但**上限本身按模型不同、且随促销变化**，
+所以它是配置项而不是常量。写这份文档时 Go 上 DeepSeek V4.1 Flash 是 $80/月。
 
 `GET https://opencode.ai/zen/go/v1/usage` 返回它们。该接口**未公开**，没有任何兼容性承诺。
 `GET .../quota` 是 404，不存在。DeepSeek 官方没有额度接口，只有

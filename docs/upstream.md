@@ -21,9 +21,15 @@ Both DeepSeek official and OpenCode Go share this window.
 | Provider | Base URL | Protocols |
 | --- | --- | --- |
 | DeepSeek official | `https://api.deepseek.com` | `/chat/completions`, `/responses` |
-| OpenCode Go | `https://opencode.ai/zen/go/v1` | `/chat/completions`, `/responses` |
+| DeepSeek official (Anthropic) | `https://api.deepseek.com/anthropic` | `/v1/messages` |
+| OpenCode Go | `https://opencode.ai/zen/go/v1` | `/chat/completions`, `/responses`, `/messages` |
 
 The Go prefix is `/zen/go/v1`, **not** `/zen/v1` (the latter is the metered Zen product).
+
+DeepSeek's Anthropic endpoint lives under its own `/anthropic` prefix, which is why an endpoint
+has the separate `anthropic_url` field (see [configuration](configuration.md)). Go serves all
+three protocols from the one prefix — verified against a live key, and note that the published
+Endpoints table lists only `chat/completions` for DeepSeek V4.1 Flash, which understates it.
 
 ## OpenCode Go requirements
 
@@ -37,11 +43,15 @@ The Go prefix is `/zen/go/v1`, **not** `/zen/v1` (the latter is the metered Zen 
 
 OpenCode Go exposes three independent windows (fractions of a monthly cap):
 
-| Window | Share | On a $60 plan |
+| Window | Share | On a $80 plan |
 | --- | --- | --- |
-| Rolling 5 hours | 20% | $12 |
-| Weekly | 50% | $30 |
-| Monthly | 100% | $60 |
+| Rolling 5 hours | 20% | $16 |
+| Weekly | 50% | $40 |
+| Monthly | 100% | $80 |
+
+The shares are fixed (20% / 50% / 100% of the monthly cap) but the cap is per model and changes
+with promotions, so it is configuration, not a constant. DeepSeek V4.1 Flash on Go was $80/month
+when this was written.
 
 `GET https://opencode.ai/zen/go/v1/usage` returns them. This endpoint is **undocumented** and
 carries no compatibility promise. `GET .../quota` is a 404 and does not exist.
