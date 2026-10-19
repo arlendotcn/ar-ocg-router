@@ -2,6 +2,7 @@
 
 use crate::config;
 use crate::models;
+use crate::proxy;
 use crate::router;
 use crate::sse::{self, UsageScanner};
 use crate::timeutil;
@@ -192,6 +193,101 @@ fn upstream_url_join_handles_v1_prefixes() {
     let fb = cfg.find("deepseek-official").unwrap();
     assert_eq!(fb.upstream_url("/v1/chat/completions"), "https://api.deepseek.com/chat/completions");
     assert_eq!(fb.upstream_url("/v1/models?x=1"), "https://api.deepseek.com/models?x=1");
+}
+
+/// A vendor may hang a protocol off its own prefix. DeepSeek serves OpenAI shapes from
+/// https://api.deepseek.com and Anthropic messages from https://api.deepseek.com/anthropic, so a
+/// request that ignores `anthropic_url` gets a bare 404 from the OpenAI prefix.
+#[test]
+fn anthropic_url_overrides_the_prefix_for_anthropic_requests_only() {
+    let cfg = r#"
+fallback:
+  - name: ds
+    url: https://api.deepseek.com
+    provider: deepseek
+    key: k
+    model: deepseek-flash
+    mode: any
+    anthropic_url: https://api.deepseek.com/anthropic/
+"#;
+    let c = config::parse(cfg, std::path::Path::new("t")).unwrap();
+    let ds = c.find("ds").unwrap();
+    // trailing slash is normalised away on parse
+    assert_eq!(ds.anthropic_url, "https://api.deepseek.com/anthropic");
+    assert_eq!(
+        ds.upstream_url_for("anthropic-messages", "/v1/messages"),
+        "https://api.deepseek.com/anthropic/v1/messages"
+    );
+    assert_eq!(
+        ds.upstream_url_for("anthropic-messages", "/v1/messages?beta=1"),
+        "https://api.deepseek.com/anthropic/v1/messages?beta=1"
+    );
+    // the other protocols keep the plain base, untouched
+    assert_eq!(
+        ds.upstream_url_for("openai-completion", "/v1/chat/completions"),
+        "https://api.deepseek.com/chat/completions"
+    );
+    assert_eq!(
+        ds.upstream_url_for("openai-responses", "/v1/responses"),
+        "https://api.deepseek.com/responses"
+    );
+}
+
+/// Without the field nothing changes: the join stays exactly what it always was.
+#[test]
+fn upstream_url_for_falls_back_to_the_plain_base() {
+    let cfg = r#"
+fallback:
+  - name: ds
+    url: https://api.deepseek.com
+    provider: deepseek
+    key: k
+    model: deepseek-flash
+    mode: any
+"#;
+    let c = config::parse(cfg, std::path::Path::new("t")).unwrap();
+    let ds = c.find("ds").unwrap();
+    assert!(ds.anthropic_url.is_empty());
+    assert_eq!(
+        ds.upstream_url_for("anthropic-messages", "/v1/messages"),
+        "https://api.deepseek.com/messages"
+    );
+    // "" (unknown mode) must not accidentally select the anthropic prefix either
+    assert_eq!(
+        ds.upstream_url_for("", "/v1/chat/completions"),
+        "https://api.deepseek.com/chat/completions"
+    );
+}
+
+/// A client must never be able to substitute its own credential for the endpoint's.
+///
+/// This is not hypothetical: OpenCode Go's /messages endpoint reads only x-api-key and ignores
+/// Authorization, so forwarding Claude Code's placeholder there turned a working endpoint into a
+/// 401 "Invalid credential".
+#[test]
+fn credential_headers_are_never_forwarded_from_the_client() {
+    assert!(proxy::is_credential_header("authorization"));
+    assert!(proxy::is_credential_header("Authorization"));
+    assert!(proxy::is_credential_header("x-api-key"));
+    assert!(proxy::is_credential_header("X-Api-Key"));
+    // ordinary protocol headers stay forwarded
+    assert!(!proxy::is_credential_header("anthropic-version"));
+    assert!(!proxy::is_credential_header("anthropic-beta"));
+    assert!(!proxy::is_credential_header("x-opencode-session"));
+}
+
+#[test]
+fn anthropic_url_must_be_an_absolute_http_url() {
+    let cfg = r#"
+fallback:
+  - name: ds
+    url: https://api.deepseek.com
+    key: k
+    model: deepseek-flash
+    anthropic_url: api.deepseek.com/anthropic
+"#;
+    let err = config::parse(cfg, std::path::Path::new("t")).unwrap_err();
+    assert!(err.contains("anthropic_url"), "{}", err);
 }
 
 // ------------------------------------------------------------------ pricing

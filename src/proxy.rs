@@ -851,7 +851,9 @@ fn proxy(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
         // The endpoint's own model wins, always: that is what makes it a node.
         let upstream_model = acc.cfg.model.clone();
 
-        let url = acc.cfg.upstream_url(&req.path);
+        // The protocol picks the prefix: an endpoint may serve Anthropic messages from a
+        // different base than its OpenAI shapes (see AccountCfg::anthropic_url).
+        let url = acc.cfg.upstream_url_for(mode.as_str(), &req.path);
         // Keep the rewritten document around as well as its bytes: if the upstream rejects the
         // request with a bad-parameter error, this is the only record of what was actually sent.
         let mut clamped: Option<Clamped> = None;
@@ -907,8 +909,7 @@ fn proxy(state: &Arc<AppState>, req: &Request, out: &mut Responder) {
             }
             for h in &client_headers {
                 if let Some(v) = req.header(h) {
-                    // never let a client override the endpoint credentials
-                    if h.eq_ignore_ascii_case("authorization") {
+                    if is_credential_header(h) {
                         continue;
                     }
                     call = call.set(h, v);
@@ -1093,6 +1094,17 @@ enum ErrorAction {
     Retry,
     /// Send the same request to the same endpoint again, after a short wait.
     RetrySame,
+}
+
+/// Whether a client-supplied header carries the endpoint's own credential.
+///
+/// Such a header is never forwarded: the endpoint's key is the router's to send, and a client
+/// value can only be a placeholder at best. Both spellings matter - "authorization" is the OpenAI
+/// one, "x-api-key" the Anthropic one, and a vendor may honour only the latter (OpenCode Go's
+/// /messages ignores Authorization entirely, so forwarding the client's header 401s an otherwise
+/// healthy endpoint).
+pub fn is_credential_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("x-api-key")
 }
 
 fn handle_upstream_error(

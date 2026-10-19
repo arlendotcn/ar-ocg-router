@@ -55,7 +55,8 @@ fallback:
 | `url` | 上游前缀，末尾不带 `/`。 |
 | `key` | 明文、`env:VAR` 或 `file:/path/key.txt`。 |
 | `model` | **必填。** 该端点唯一会发出的模型 id，原样透传。写错会在上游报错并自动换下一个。 |
-| `mode` | `openai-completion` / `openai-responses` / `anthropic-messages` / `both` / `any`，也可写列表。 |
+| `mode` | `openai-completion` / `openai-responses` / `anthropic-messages` / `both` / `any`，也可写列表。**只写端点真的支持的协议**：路由器的 `mode` 是声明，不是保证，声明错了就会把请求发到上游不存在的路径上。 |
+| `anthropic_url` | 仅 `anthropic-messages` 请求改用这个前缀，其余协议仍走 `url`。厂商把不同协议挂在**不同路径前缀**下时用，例如 DeepSeek 官方的 OpenAI 在 `https://api.deepseek.com`、Anthropic 在 `https://api.deepseek.com/anthropic`。不写 = 所有协议都用 `url`（旧行为）。见下。 |
 | `order` | 同一列表内的消耗顺序，越小越先。由条目位置推导，每次保存都会按位置重写——请在控制台里拖拽调整，不要手改。 |
 | `rule` | 仅 `fallback`：允许它**作为首选**的条件。见下。 |
 | `inject_session` | 发送 `x-opencode-session`。OpenCode Go 要求必须带。 |
@@ -63,6 +64,38 @@ fallback:
 | `drop_params` | 该端点不接受的请求体字段。 |
 | `max_output_tokens_limit` | **是上限，不是固定值。** 客户端要的值超过它时，改用它发出去；不超过则一字不动。不写或写 `0` 表示完全不碰这个值。请按实测填、不要猜：填小了会静默缩短每一次长回答。详见下。 |
 | `enabled` | `false` 会把该端点从**所有**候选列表移除，包括失败兜底。见 [路由决策](routing-zh.md)。 |
+
+#### `anthropic_url`
+
+一个端点通常用一个前缀服务所有协议，但**有的厂商不这么做**。DeepSeek 官方就是这样：
+
+```
+POST https://api.deepseek.com/v1/chat/completions   → 200
+POST https://api.deepseek.com/responses             → 200
+POST https://api.deepseek.com/v1/messages            → 404（空 body）
+POST https://api.deepseek.com/anthropic/v1/messages  → 200
+```
+
+也就是说 Anthropic 协议挂在独立的 `/anthropic` 前缀下——符合 Anthropic SDK 的
+`base_url` = `https://api.deepseek.com/anthropic` 的写法。只配 `url` 时，路由器会把
+`/v1/messages` 拼到 OpenAI 前缀上，拿回一个 404（且 body 为空，日志里显示为 `HTTP 404: null`，
+很容易被误读成路由器的 bug）。
+
+```yaml
+  - name: ds-official-flash
+    url: https://api.deepseek.com
+    anthropic_url: https://api.deepseek.com/anthropic   # 只有 anthropic-messages 走这里
+    provider: deepseek
+    model: deepseek-flash
+    mode: openai-completion,openai-responses,anthropic-messages
+```
+
+三个要点：
+
+- **路径原样保留。** 显式前缀是不透明的基础地址，请求路径按客户端发来的样子拼接
+  （`/v1/messages` 不会被剥成 `/messages`）；主 `url` 仍走原来的归一化规则。
+- **只影响 Anthropic。** `openai-completion` 与 `openai-responses` 继续用 `url`。
+- **不写就完全不变。** 没有该字段时行为与以前逐字节一致。
 
 #### `max_output_tokens_limit`
 

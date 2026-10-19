@@ -55,7 +55,8 @@ fallback:
 | `url` | Upstream prefix, no trailing slash. |
 | `key` | Literal, `env:VAR`, or `file:/path/key.txt`. |
 | `model` | **Required.** The only model id this endpoint ever sends, verbatim. A wrong id fails upstream and the router moves on. |
-| `mode` | `openai-completion` / `openai-responses` / `anthropic-messages` / `both` / `any`, or a list. |
+| `mode` | `openai-completion` / `openai-responses` / `anthropic-messages` / `both` / `any`, or a list. **Declare only the protocols the endpoint really serves**: the router treats `mode` as your statement of fact, and a wrong declaration sends requests to a path the upstream does not have. |
+| `anthropic_url` | Prefix used for `anthropic-messages` requests only; every other protocol keeps using `url`. For vendors that hang different protocols off different paths — DeepSeek serves OpenAI shapes from `https://api.deepseek.com` and Anthropic messages from `https://api.deepseek.com/anthropic`. Omitted = every protocol uses `url` (the old behaviour). See below. |
 | `order` | Consumption order inside its list; smaller goes first. Derived from the position of the entry, and rewritten that way on every save — arrange it in the console instead of editing it here. |
 | `rule` | `fallback` only: conditions under which it may be *preferred*. See below. |
 | `inject_session` | Send `x-opencode-session`. Required by OpenCode Go. |
@@ -63,6 +64,40 @@ fallback:
 | `drop_params` | Body fields this endpoint rejects. |
 | `max_output_tokens_limit` | **A ceiling, not a fixed value.** When the client asks for more than this, the request is sent with this value instead; anything at or below it is passed through untouched. Omitted or `0` means the value is never touched. Set it from a measured upstream limit, not a guess: set too low, it silently shortens every long answer. See below. |
 | `enabled` | `false` removes the endpoint from every candidate list, including failover. See [Routing](routing.md). |
+
+#### `anthropic_url`
+
+One endpoint usually serves every protocol from one prefix, but **not every vendor works that
+way**. DeepSeek official is the case in point:
+
+```
+POST https://api.deepseek.com/v1/chat/completions   → 200
+POST https://api.deepseek.com/responses             → 200
+POST https://api.deepseek.com/v1/messages            → 404 (empty body)
+POST https://api.deepseek.com/anthropic/v1/messages  → 200
+```
+
+The Anthropic protocol lives under its own `/anthropic` prefix — exactly what the Anthropic SDK
+expresses as `base_url` = `https://api.deepseek.com/anthropic`. With `url` alone the router
+appends `/v1/messages` to the OpenAI prefix and gets a 404 back whose body is empty, so the log
+says `HTTP 404: null` and reads like a router bug.
+
+```yaml
+  - name: ds-official-flash
+    url: https://api.deepseek.com
+    anthropic_url: https://api.deepseek.com/anthropic   # only anthropic-messages uses this
+    provider: deepseek
+    model: deepseek-flash
+    mode: openai-completion,openai-responses,anthropic-messages
+```
+
+Three properties:
+
+- **The path is appended verbatim.** An explicit prefix is an opaque base, so the request path
+  goes on as the client sent it (`/v1/messages` is not stripped to `/messages`); the primary
+  `url` keeps the usual normalisation.
+- **Anthropic only.** `openai-completion` and `openai-responses` still use `url`.
+- **Omitted means unchanged.** Without the field the join is byte-for-byte what it always was.
 
 #### `max_output_tokens_limit`
 

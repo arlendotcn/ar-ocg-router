@@ -147,6 +147,9 @@ pub fn account_to_yaml(a: &AccountCfg, compat_drop: &[String]) -> Y {
     m.insert(ystr("key"), ystr(&a.key));
     m.insert(ystr("model"), ystr(&a.model));
     m.insert(ystr("mode"), ystr(&modes_str(&a.modes)));
+    if !a.anthropic_url.trim().is_empty() {
+        m.insert(ystr("anthropic_url"), ystr(&a.anthropic_url));
+    }
     // Written for transparency (a human can read the sequence off the file), but it is derived:
     // the console renumbers it from the row position on every save, and it is never edited by hand.
     m.insert(ystr("order"), Y::Number(serde_yaml::Number::from(a.order)));

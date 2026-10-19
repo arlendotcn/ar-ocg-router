@@ -161,7 +161,11 @@ fallback:
     provider: deepseek
     key: sk-REPLACE_ME
     model: deepseek-flash
-    mode: both
+    # DeepSeek serves the Anthropic protocol under its own prefix, so anthropic-messages needs a
+    # second base: /v1/messages against the plain host is a 404. Drop the protocol from "mode"
+    # (or this line) if you do not use Claude Code.
+    mode: openai-completion,openai-responses,anthropic-messages
+    anthropic_url: https://api.deepseek.com/anthropic
     order: 10
     rule: [offpeak, quota_low]
     quota: { probe: balance }

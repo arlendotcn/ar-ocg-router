@@ -329,6 +329,14 @@ pub struct AccountCfg {
     pub prices: PricesCfg,
     pub quota: QuotaCfg,
     pub inject_session: bool,
+    /// Base URL used instead of `url` for Anthropic-protocol requests. Empty = use `url`.
+    ///
+    /// One endpoint normally serves every protocol from one prefix, but a vendor may hang a
+    /// different protocol off its own path: DeepSeek's OpenAI endpoints live at
+    /// `https://api.deepseek.com` while its Anthropic endpoint is
+    /// `https://api.deepseek.com/anthropic`. Without this the router would send
+    /// `/v1/messages` to the OpenAI prefix and get a bare 404 back.
+    pub anthropic_url: String,
     /// Explicit opt-out written by the console ("enabled: false"). Kept separate from the rule
     /// list because a prepaid plan's rules are not a preference list in the same way.
     pub disabled: bool,
@@ -364,15 +372,45 @@ impl AccountCfg {
         self.url.trim_end_matches('/').to_string()
     }
 
+    /// Base URL for a request speaking `mode`: the per-protocol override when there is one.
+    pub fn base_for(&self, mode: Mode) -> String {
+        if mode == Mode::Anthropic && !self.anthropic_url.trim().is_empty() {
+            // Appended verbatim: an operator writes the prefix the vendor documents
+            // (`https://api.deepseek.com/anthropic`), and the request path supplies `/v1` itself.
+            return self.anthropic_url.trim_end_matches('/').to_string();
+        }
+        self.base()
+    }
+
     /// Build the upstream URL for a normalized request path (both /v1 and bare styles work).
+    ///
+    /// `mode` only selects the prefix (see `base_for`); the path itself is never rewritten here.
     pub fn upstream_url(&self, path_with_query: &str) -> String {
-        let base = self.base();
+        self.upstream_url_for("", path_with_query)
+    }
+
+    /// Same join, with the protocol deciding which base prefix is used.
+    pub fn upstream_url_for(&self, mode: &str, path_with_query: &str) -> String {
+        let anthropic = matches!(Mode::parse(mode), Some(ms) if ms.as_slice() == [Mode::Anthropic]);
+        let base = if anthropic { self.base_for(Mode::Anthropic) } else { self.base() };
         let (path, query) = match path_with_query.split_once('?') {
             Some((p, q)) => (p, Some(q)),
             None => (path_with_query, None),
         };
-        let normalized = crate::models::normalize_path(path);
-        let mut suffix = normalized;
+        // An explicit protocol prefix is an opaque base the vendor documents, so the path is
+        // appended as the client sent it: https://api.deepseek.com/anthropic + /v1/messages.
+        // normalize_path() drops /v1, which is right for the primary base (it either already
+        // carries /v1 or is a bare host) and wrong here.
+        let mut suffix = if anthropic && !self.anthropic_url.trim().is_empty() {
+            if path.starts_with('/') {
+                path.to_string()
+            } else {
+                format!("/{}", path)
+            }
+        } else {
+            crate::models::normalize_path(path)
+        };
+        // Drop a duplicated /v1 only when the base already carries it.
         if base.ends_with("/v1") {
             if let Some(rest) = suffix.strip_prefix("/v1") {
                 suffix = rest.to_string();
@@ -1158,6 +1196,24 @@ pub fn parse(raw: &str, path: &Path) -> Result<Config, String> {
             if !(url.starts_with("http://") || url.starts_with("https://")) {
                 return Err(format!("{}[{}].url must start with http:// or https://", key, idx));
             }
+            // Optional: the prefix this endpoint uses for Anthropic-protocol requests, when the
+            // vendor hangs that protocol off a path rather than serving it from the same base.
+            let anthropic_url = yget_any(
+                m,
+                &["anthropic_url", "messages_url", "anthropic_base_url", "anthropic_base"],
+            )
+                .and_then(ystr)
+                .map(|s| s.trim().trim_end_matches('/').to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_default();
+            let absolute = anthropic_url.starts_with("http://")
+                || anthropic_url.starts_with("https://");
+            if !anthropic_url.is_empty() && !absolute {
+                return Err(format!(
+                    "{}[{}].anthropic_url must start with http:// or https://",
+                    key, idx
+                ));
+            }
             let keyval = yget_any(m, &["key", "api_key", "apiKey", "token"])
                 .ok_or_else(|| format!("{}[{}].key is required", key, idx))
                 .and_then(resolve_secret)?;
@@ -1461,6 +1517,7 @@ pub fn parse(raw: &str, path: &Path) -> Result<Config, String> {
                 prices,
                 quota,
                 inject_session,
+                anthropic_url,
                 disabled,
                 model,
             });
