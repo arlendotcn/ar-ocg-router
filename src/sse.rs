@@ -57,22 +57,34 @@ pub fn extract_usage(v: &Value) -> RawUsage {
             .or_else(|| v.get("message").and_then(|m| m.get("usage"))),
     };
     if let Some(usage) = usage {
-        let prompt = usage
-            .get("prompt_tokens")
-            .or_else(|| usage.get("input_tokens"));
         let completion = usage
             .get("completion_tokens")
             .or_else(|| usage.get("output_tokens"));
-        u.prompt = num(prompt);
         u.completion = num(completion);
-        u.cached = num(usage
-            .get("prompt_cache_hit_tokens")
-            .or_else(|| usage
-                .get("prompt_tokens_details")
-                .and_then(|d| d.get("cached_tokens")))
-            .or_else(|| usage
-                .get("input_tokens_details")
-                .and_then(|d| d.get("cached_tokens"))));
+
+        // Anthropic Messages usage reports `input_tokens` as the *uncached* remainder;
+        // the full prompt is input + cache_read + cache_creation. OpenAI-style payloads
+        // report `prompt_tokens` as the total and put cache hits in a details object.
+        let cache_read = usage.get("cache_read_input_tokens");
+        if cache_read.is_some() || usage.get("cache_creation_input_tokens").is_some() {
+            let input = num(usage.get("input_tokens"));
+            let read = num(cache_read);
+            let write = num(usage.get("cache_creation_input_tokens"));
+            u.prompt = input + read + write;
+            u.cached = read;
+        } else {
+            u.prompt = num(usage
+                .get("prompt_tokens")
+                .or_else(|| usage.get("input_tokens")));
+            u.cached = num(usage
+                .get("prompt_cache_hit_tokens")
+                .or_else(|| usage
+                    .get("prompt_tokens_details")
+                    .and_then(|d| d.get("cached_tokens")))
+                .or_else(|| usage
+                    .get("input_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))));
+        }
         u.seen = true;
     }
     let cost = v
@@ -187,4 +199,42 @@ pub fn brief(v: &Value) -> String {
         .or_else(|| v.get("message").and_then(|m| m.as_str()).map(|s| s.to_string()))
         .unwrap_or_else(|| util::json_compact(v));
     util::truncate(&msg, 300)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn extracts_anthropic_cache_usage() {
+        let v = json!({
+            "usage": {
+                "input_tokens": 9694,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 217088,
+                "output_tokens": 831
+            }
+        });
+        let u = extract_usage(&v);
+        assert_eq!(u.prompt, 226782);
+        assert_eq!(u.cached, 217088);
+        assert_eq!(u.completion, 831);
+        assert!(u.seen);
+    }
+
+    #[test]
+    fn keeps_openai_usage_semantics() {
+        let v = json!({
+            "usage": {
+                "prompt_tokens": 78728,
+                "completion_tokens": 500,
+                "prompt_tokens_details": {"cached_tokens": 77440}
+            }
+        });
+        let u = extract_usage(&v);
+        assert_eq!(u.prompt, 78728);
+        assert_eq!(u.cached, 77440);
+        assert_eq!(u.completion, 500);
+    }
 }
